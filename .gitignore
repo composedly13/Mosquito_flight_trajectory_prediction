@@ -1,5 +1,6 @@
 data/
 submissions/
+dev/experiments/outputs/
 __pycache__/
 *.pyc
 *.pyo
