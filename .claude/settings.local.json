@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/compo/.conda/envs/DNN/python.exe dev/eda/visualize_miss.py)",
+      "Bash(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader)",
+      "Bash(nvidia-smi)"
+    ]
+  }
+}
