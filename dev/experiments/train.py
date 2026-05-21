@@ -8,9 +8,9 @@ from tqdm import tqdm
 import hashlib
 
 from config import *
-from dataset import load_all, MosquitoDataset
+from dataset import load_all, MosquitoDataset, augment_batch_gpu
 from model import CandidateSelector, soft_labels, selector_predict
-from candidates import N_CANDIDATES
+from candidates import N_CANDIDATES, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 from boundary import train_boundary, apply_boundary
 
 
@@ -44,8 +44,8 @@ def train_fold(
     train_ds = MosquitoDataset(coords[train_mask], labels[train_mask], augment=True)
     val_ds   = MosquitoDataset(coords[val_mask],   labels[val_mask],   augment=False)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
 
     model     = CandidateSelector().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -59,10 +59,14 @@ def train_fold(
         # Train
         model.train()
         for batch in train_loader:
-            seq_f  = batch["seq_feat"].to(device)
-            cand_f = batch["cand_feat"].to(device)
-            cands  = batch["cands"].to(device)
-            true   = batch["label"].to(device)
+            coords_b = batch["coords"].to(device, non_blocking=True)
+            true     = batch["label"].to(device, non_blocking=True)
+
+            coords_b, true = augment_batch_gpu(coords_b, true)
+
+            cands  = make_candidates_gpu(coords_b)
+            seq_f  = make_seq_features_gpu(coords_b)
+            cand_f = make_cand_features_gpu(coords_b, cands)
 
             logits = model(seq_f, cand_f)                        # (B, C)
             soft   = soft_labels(cands, true)                    # (B, C)
@@ -83,13 +87,16 @@ def train_fold(
         preds, trues = [], []
         with torch.no_grad():
             for batch in val_loader:
-                seq_f  = batch["seq_feat"].to(device)
-                cand_f = batch["cand_feat"].to(device)
-                cands  = batch["cands"].to(device)
+                coords_b = batch["coords"].to(device, non_blocking=True)
+
+                cands  = make_candidates_gpu(coords_b)
+                seq_f  = make_seq_features_gpu(coords_b)
+                cand_f = make_cand_features_gpu(coords_b, cands)
+
                 logits = model(seq_f, cand_f)
                 pred   = selector_predict(logits, cands)
                 preds.append(pred.cpu().numpy())
-                trues.append(batch["label"].numpy())
+                trues.append(batch["label"].cpu().numpy())
 
         preds = np.concatenate(preds)
         trues = np.concatenate(trues)

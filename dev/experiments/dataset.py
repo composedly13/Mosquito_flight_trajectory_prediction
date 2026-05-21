@@ -3,7 +3,6 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-from candidates import make_candidates, make_seq_features, make_cand_features, N_CANDIDATES
 
 
 def load_all(data_dir: Path, labels_path: Path = None):
@@ -25,54 +24,41 @@ def load_all(data_dir: Path, labels_path: Path = None):
     return ids, coords, labels
 
 
+def augment_batch_gpu(coords: torch.Tensor, labels: torch.Tensor):
+    """Random SO3 rotation on GPU. coords: (B,11,3), labels: (B,3)"""
+    B, dev, dt = coords.shape[0], coords.device, coords.dtype
+    u  = torch.rand(B, 3, device=dev, dtype=dt)
+    s1 = (1 - u[:, 0]).sqrt()
+    s0 = u[:, 0].sqrt()
+    p2 = 2 * torch.pi
+
+    qw = s1 * (p2 * u[:, 1]).sin()
+    qx = s1 * (p2 * u[:, 1]).cos()
+    qy = s0 * (p2 * u[:, 2]).sin()
+    qz = s0 * (p2 * u[:, 2]).cos()
+
+    R = torch.stack([
+        1-2*(qy*qy+qz*qz),  2*(qx*qy-qw*qz),  2*(qx*qz+qw*qy),
+          2*(qx*qy+qw*qz),  1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx),
+          2*(qx*qz-qw*qy),    2*(qy*qz+qw*qx), 1-2*(qx*qx+qy*qy),
+    ], dim=-1).view(B, 3, 3)
+
+    coords_r = torch.bmm(coords, R.mT)
+    labels_r = (labels[:, None] @ R.mT).squeeze(1)
+    return coords_r, labels_r
+
+
 class MosquitoDataset(Dataset):
     def __init__(self, coords: np.ndarray, labels: np.ndarray = None, augment: bool = False):
         self.coords  = coords
         self.labels  = labels
-        self.augment = augment
-        self.is_train = labels is not None
+        self.augment = augment  # read by train loop to decide GPU augmentation
 
     def __len__(self):
         return len(self.coords)
 
-    def _augment(self, coords: np.ndarray, label: np.ndarray = None):
-        """Random 3D rotation."""
-        u  = np.random.uniform(0, 1, 3).astype(np.float32)
-        q  = np.array([
-            np.sqrt(1 - u[0]) * np.sin(2 * np.pi * u[1]),
-            np.sqrt(1 - u[0]) * np.cos(2 * np.pi * u[1]),
-            np.sqrt(u[0])     * np.sin(2 * np.pi * u[2]),
-            np.sqrt(u[0])     * np.cos(2 * np.pi * u[2]),
-        ], dtype=np.float32)
-        w, x, y, z = q
-        R = np.array([
-            [1-2*(y*y+z*z),  2*(x*y-w*z),   2*(x*z+w*y)],
-            [2*(x*y+w*z),   1-2*(x*x+z*z),  2*(y*z-w*x)],
-            [2*(x*z-w*y),    2*(y*z+w*x),  1-2*(x*x+y*y)],
-        ], dtype=np.float32)
-        coords = coords @ R.T
-        if label is not None:
-            label = label @ R.T
-        return coords, label
-
     def __getitem__(self, idx):
-        coords = self.coords[idx].copy()
-        label  = self.labels[idx].copy() if self.is_train else None
-
-        if self.augment:
-            coords, label = self._augment(coords, label)
-
-        cands     = make_candidates(coords[np.newaxis])[0]       # (C, 3)
-        seq_feat  = make_seq_features(coords[np.newaxis])[0]     # (11, 9)
-        cand_feat = make_cand_features(
-            coords[np.newaxis], cands[np.newaxis]
-        )[0]                                                      # (C, 10)
-
-        out = {
-            "seq_feat":  torch.tensor(seq_feat),
-            "cand_feat": torch.tensor(cand_feat),
-            "cands":     torch.tensor(cands),
-        }
-        if self.is_train:
-            out["label"] = torch.tensor(label)
+        out = {"coords": torch.tensor(self.coords[idx])}
+        if self.labels is not None:
+            out["label"] = torch.tensor(self.labels[idx])
         return out

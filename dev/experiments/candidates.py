@@ -5,6 +5,7 @@ Each candidate is a physically plausible prediction of position at +80ms.
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
+import torch
 from config import EPS
 
 
@@ -228,3 +229,131 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
     ], axis=2).astype(np.float32)   # (N, C, 10)
 
     return feats
+
+
+# ---------------------------------------------------------------------------
+# GPU (torch) versions — same logic, batch operations on GPU
+# ---------------------------------------------------------------------------
+
+_CAND_PARAMS_CACHE: dict = {}
+
+def _cand_params_gpu(device, dtype):
+    key = (str(device), dtype)
+    if key not in _CAND_PARAMS_CACHE:
+        arr = np.array([[s.d1, s.d2, s.par, s.perp, s.jerk, s.time_scale]
+                        for s in CANDIDATES], dtype=np.float32)
+        _CAND_PARAMS_CACHE[key] = torch.tensor(arr, device=device, dtype=dtype)
+    return _CAND_PARAMS_CACHE[key]  # (C, 6)
+
+
+def make_candidates_gpu(x: torch.Tensor) -> torch.Tensor:
+    """x: (B, 11, 3) → (B, C, 3)"""
+    p0       = x[:, 10]
+    d1       = x[:, 10] - x[:, 9]
+    d2       = x[:, 9]  - x[:, 8]
+    acc      = d1 - d2
+    prev_acc = d2 - (x[:, 8] - x[:, 7])
+    jerk     = acc - prev_acc
+
+    speed    = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
+    tangent  = d1 / speed
+    acc_par  = (acc * tangent).sum(-1, keepdim=True) * tangent
+    acc_perp = acc - acc_par
+
+    p = _cand_params_gpu(x.device, x.dtype)             # (C, 6)
+    d1_c, d2_c, par_c, pe_c, jk_c, ts_c = p.unbind(-1) # (C,) each
+    ts2_c = ts_c ** 2
+
+    return (
+        p0[:, None]
+        + (d1_c * ts_c)[None, :, None]   * d1[:, None]
+        + (d2_c * ts_c)[None, :, None]   * d2[:, None]
+        + (par_c * ts2_c)[None, :, None] * acc_par[:, None]
+        + (pe_c  * ts2_c)[None, :, None] * acc_perp[:, None]
+        + (jk_c  * ts2_c)[None, :, None] * jerk[:, None]
+    )  # (B, C, 3)
+
+
+def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
+    """x: (B, 11, 3) → (B, 11, 9)"""
+    B, dev, dt = x.shape[0], x.device, x.dtype
+    feats = [torch.zeros(B, 9, device=dev, dtype=dt)]  # t=0 padding
+
+    for t in range(1, 11):
+        d1    = x[:, t] - x[:, t - 1]
+        speed = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
+        tang  = d1 / speed
+
+        if t >= 2:
+            d2               = x[:, t - 1] - x[:, t - 2]
+            acc              = d1 - d2
+            prev_speed       = d2.norm(dim=-1, keepdim=True).clamp(min=EPS)
+            prev_speed_ratio = prev_speed / speed
+            acc_par_s        = (acc * tang).sum(-1, keepdim=True)
+            acc_par          = acc_par_s * tang
+            acc_perp         = (acc - acc_par).norm(dim=-1, keepdim=True)
+            acc_norm         = acc.norm(dim=-1, keepdim=True)
+            turn_cos         = ((tang * (d2 / prev_speed)).sum(-1, keepdim=True)).clamp(-1, 1)
+            curvature        = acc_perp / (speed ** 2 + EPS)
+        else:
+            prev_speed_ratio = torch.ones(B, 1, device=dev, dtype=dt)
+            acc_par_s        = torch.zeros(B, 1, device=dev, dtype=dt)
+            acc_perp         = torch.zeros(B, 1, device=dev, dtype=dt)
+            acc_norm         = torch.zeros(B, 1, device=dev, dtype=dt)
+            turn_cos         = torch.ones(B, 1, device=dev, dtype=dt)
+            curvature        = torch.zeros(B, 1, device=dev, dtype=dt)
+
+        if t >= 3:
+            d3             = x[:, t - 2] - x[:, t - 3]
+            prev_acc       = d2 - d3
+            jerk_norm      = (acc - prev_acc).norm(dim=-1, keepdim=True) / (speed + EPS)
+            direction_flag = torch.sign(acc_par_s)
+        else:
+            jerk_norm      = torch.zeros(B, 1, device=dev, dtype=dt)
+            direction_flag = torch.zeros(B, 1, device=dev, dtype=dt)
+
+        feats.append(torch.cat([
+            speed / 0.05,
+            prev_speed_ratio,
+            acc_norm  / (speed + EPS),
+            acc_par_s / (speed + EPS),
+            acc_perp  / (speed + EPS),
+            jerk_norm,
+            turn_cos,
+            curvature * 10,
+            direction_flag,
+        ], dim=-1))  # (B, 9)
+
+    return torch.stack(feats, dim=1)  # (B, 11, 9)
+
+
+def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:
+    """x: (B,11,3), cands: (B,C,3) → (B,C,10)"""
+    p0        = x[:, 10]
+    d1        = x[:, 10] - x[:, 9]
+    speed     = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
+    tangent   = d1 / speed
+    acc       = d1 - (x[:, 9] - x[:, 8])
+    acc_par_s = (acc * tangent).sum(-1, keepdim=True)   # (B, 1)
+
+    delta     = cands - p0[:, None]                     # (B, C, 3)
+    dist      = delta.norm(dim=-1)                      # (B, C)
+    cand_par  = torch.einsum('bci,bi->bc', delta, tangent)
+    cand_perp = dist - cand_par.abs()
+    speed_h   = speed[:, 0] * 2.0                       # (B,)
+
+    p = _cand_params_gpu(x.device, x.dtype)             # (C, 6)
+    d1_a, d2_a, par_a, pe_a, jk_a, ts_a = p.unbind(-1) # (C,) each
+
+    return torch.stack([
+        cand_par  / (speed_h[:, None] + EPS),
+        cand_perp / (speed_h[:, None] + EPS),
+        dist      / (speed_h[:, None] + EPS),
+        d1_a [None].expand(len(x), -1),
+        par_a[None].expand(len(x), -1),
+        pe_a [None].expand(len(x), -1),
+        d2_a [None].expand(len(x), -1),
+        jk_a [None].expand(len(x), -1),
+        ts_a [None].expand(len(x), -1),
+        (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES),
+    ], dim=-1)  # (B, C, 10)

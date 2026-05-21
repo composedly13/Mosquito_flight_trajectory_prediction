@@ -12,7 +12,7 @@ from config import (
 )
 from dataset import load_all
 from model import CandidateSelector, selector_predict
-from candidates import make_candidates, make_seq_features, make_cand_features
+from candidates import make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 from boundary import BoundaryMLP, apply_boundary
 
 
@@ -68,20 +68,18 @@ def predict():
     all_coords = []
 
     for start in tqdm(range(0, N, BATCH_SIZE), desc="Inference"):
-        end = min(start + BATCH_SIZE, N)
-        c   = coords[start:end]                            # (B, 11, 3)
+        end  = min(start + BATCH_SIZE, N)
+        c_np = coords[start:end]                           # (B, 11, 3) numpy
+        c    = torch.tensor(c_np).to(device)
 
-        cands     = make_candidates(c)                     # (B, C, 3)
-        seq_feat  = make_seq_features(c)                   # (B, 11, 9)
-        cand_feat = make_cand_features(c, cands)           # (B, C, 10)
-
-        seq_t   = torch.tensor(seq_feat).to(device)
-        cand_t  = torch.tensor(cand_feat).to(device)
-        cands_t = torch.tensor(cands).to(device)
+        with torch.no_grad():
+            cands_t = make_candidates_gpu(c)
+            seq_t   = make_seq_features_gpu(c)
+            cand_t  = make_cand_features_gpu(c, cands_t)
 
         pred = predict_batch(selectors, seq_t, cand_t, cands_t)
         all_preds.append(pred)
-        all_coords.append(c)
+        all_coords.append(c_np)
 
     all_preds  = np.concatenate(all_preds,  axis=0)   # (N, 3)
     all_coords = np.concatenate(all_coords, axis=0)   # (N, 11, 3)
