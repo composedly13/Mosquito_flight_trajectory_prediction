@@ -231,6 +231,21 @@ python dev/experiments/predict.py
 
 ---
 
+## 현재 파이프라인 (Current Default)
+
+| 항목 | 현재 설정 |
+|---|---|
+| Candidates | **50개** (Frenet + turn + jerk + 복합) |
+| Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
+| Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
+| Prediction | Top-k weighted average (최적 k는 analyze.py로 결정) |
+| Boundary MLP | **비활성화** (OOF -7.22pp, 기각됨) |
+| TTA | **비활성화** (효과 없음, yaw 불변 모델) |
+| CV R-Hit | **64.13%** (OOF, yaw aug 기준) |
+| Oracle ceiling | **74.89%** |
+
+---
+
 ## 브랜치 구조
 
 | 브랜치 | 용도 |
