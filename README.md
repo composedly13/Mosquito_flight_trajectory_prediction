@@ -148,7 +148,7 @@ pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jer
 | 항목 | 설정 |
 |---|---|
 | K-Fold | 5-Fold (MD5 해시 기반 안정적 분할) |
-| 데이터 증강 | SO3 랜덤 3D 회전 (매 에폭마다 다른 회전) |
+| 데이터 증강 | SO3 랜덤 3D 회전 — 배치 단위로 GPU에서 수행 |
 | 옵티마이저 | AdamW (lr=3e-4, weight_decay=1e-4) |
 | 스케줄러 | CosineAnnealingLR |
 | Early Stopping | patience=30 |
@@ -161,10 +161,9 @@ pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jer
 | 셀렉터 | Attn-GRU | **Transformer + Cross-Attention** |
 | 후보 수 | 28개 | **35개** |
 | 학습 | 단일 모델 | **5-Fold 앙상블** |
-| 증강 | 없음 | **SO3 3D 회전 (GPU 배치)** |
+| 증강 | 없음 | **SO3 3D 회전** |
 | 손실 | CE | **Soft-label CE + Pairwise ranking** |
 | Boundary | 전체 데이터 | **OOF만 사용** |
-| Feature 계산 | CPU per-sample | **GPU 배치 연산 (25x 빠름)** |
 
 ---
 
@@ -185,7 +184,7 @@ pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jer
 │   └── experiments/             # 모델 코드
 │       ├── config.py            # 경로 및 하이퍼파라미터
 │       ├── candidates.py        # Frenet 기반 후보 생성 + 피처 추출
-│       ├── dataset.py           # MosquitoDataset (SO3 증강)
+│       ├── dataset.py           # MosquitoDataset (raw coords 반환) + augment_batch_gpu
 │       ├── model.py             # CandidateSelector (Transformer)
 │       ├── boundary.py          # BoundaryMLP (잔차 보정)
 │       ├── train.py             # K-Fold 학습 루프
