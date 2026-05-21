@@ -242,11 +242,28 @@ python dev/experiments/predict.py
 
 ## 성능 기록
 
-| 모델 | CV R-Hit | LB R-Hit |
-|---|---|---|
-| 물리 베이스라인 (β=0.6) | 60.08% | - |
-| PB 참고 솔루션 | - | 68.22% |
-| CandidateSelector (ours) | 진행 중 | - |
+| 모델 | CV R-Hit | LB R-Hit | 비고 |
+|---|---:|---:|---|
+| Linear extrapolation | 57.88% | - | p₀ + 2v |
+| Acceleration β=0.6 | 60.08% | - | 물리 베이스라인 최고 |
+| PB 참고 솔루션 | - | 68.22% | 공개 솔루션 |
+| 35-candidate oracle | 72.18% | - | 후보군 상한 |
+| 35-candidate selector | 64.28% | - | Top-3, boundary 없음 |
+| 35-candidate + Boundary | 57.06% | - | ❌ 기각 (-7.22pp) |
+| 50-candidate oracle | 74.89% | - | 후보 확장 상한 |
+| 50-candidate selector | 재학습 중 | - | d_model=256, yaw aug |
+
+### Selector Error Decomposition
+
+| 항목 | 35 candidates | 50 candidates |
+|---|---:|---:|
+| Oracle R-Hit | 72.18% | 74.89% |
+| OOF R-Hit (best Top-k) | 64.28% | 재학습 예정 |
+| Selector efficiency | 89.1% | 재학습 예정 |
+| Oracle candidate in Top-1 | 측정 예정 | 측정 예정 |
+| Oracle candidate in Top-3 | 측정 예정 | 측정 예정 |
+| Oracle candidate in Top-5 | 측정 예정 | 측정 예정 |
+| Best Top-k | 3 | 재학습 후 재탐색 |
 
 ---
 
@@ -398,3 +415,42 @@ python dev/experiments/predict.py
 2. selector efficiency ≥ 90% 목표 (현 85.6% 대비)
 3. analyze.py로 top-1 vs top-k 비교 — 가중 평균 유효성 확인
 4. oracle report로 어떤 후보 파라미터가 주도적인지 확인
+
+---
+
+### 2026-05-22 (3)
+
+**[실험 로드맵 확정 및 analyze.py 진단 강화]**
+
+**방향 검증 (이전 실험 결과 기반)**
+- Boundary MLP 제거: ✅ (0.6428 → 0.5706, 포폴용 "실패한 후처리 분석 후 제거" 사례)
+- 후보 확장 35→50: ✅ oracle +2.71pp (72.18%→74.89%), 단 selector 재학습 필요
+- TTA 제거: ✅ (SO3 훈련으로 회전 불변, 추론 시간만 낭비)
+
+**실험 우선순위**
+
+| 순위 | 내용 | 현재 상태 |
+|---|---|---|
+| 1 | 50개 후보 완전 재학습 (d_model=256, yaw aug) | 진행 중 |
+| 2 | soft-label temperature 재탐색 (0.003/0.005/0.007/0.010) | 대기 |
+| 3 | pairwise loss weight 재탐색 (0.0/0.1/0.25/0.5) | 대기 |
+| 4 | Top-k 재탐색 (1/3/5/7) — 재학습 후 analyze.py 자동 확인 | 대기 |
+| 5 | selector error decomposition 분석 | analyze.py에 구현 완료 |
+
+**현실적 목표**
+
+| 단계 | 기대 CV |
+|---|---|
+| 50개 후보 재학습 성공 | 66~67% |
+| loss/temp/top-k 튜닝 | 67~68.5% |
+| selector error 분석 후 개선 | ~69% |
+| efficiency ≥ 93.5% 달성 시 | 70% (74.89% × 93.5%) |
+
+**analyze.py 섹션 4 추가: SELECTOR ERROR DECOMPOSITION**
+- `oracle_selector_decomposition()` 함수 구현
+- 3개 그룹으로 분류:
+  - A (oracle hit ∩ top-5 포함): 가중 평균이 성능을 깎는지 확인 (Top-1 vs Top-5 비교)
+  - B (oracle hit ∩ top-5 미포함): selector 학습/ranking 문제
+  - C (oracle miss): 후보군 한계 → 후보 확장으로만 해결 가능
+- Oracle candidate rank 분포 (mean/median/p75/p90) 출력
+- 해석 가이드 자동 출력 (B 비중, Top-1 vs Top-5 우세 여부)

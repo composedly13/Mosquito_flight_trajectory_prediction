@@ -110,6 +110,102 @@ def candidate_oracle_report(coords: np.ndarray, labels: np.ndarray) -> tuple:
     return oracle_hit, best_dist, best_idx
 
 
+def oracle_selector_decomposition(
+    models: dict, ids: list, coords: np.ndarray, labels: np.ndarray,
+    device: torch.device,
+) -> None:
+    """
+    Decomposes selector error into three groups:
+      A: oracle candidate exists AND is in top-5  (averaging may hurt)
+      B: oracle candidate exists but NOT in top-5 (selector ranking problem)
+      C: oracle candidate itself misses threshold  (candidate generation ceiling)
+    """
+    cands_np  = make_candidates(coords)                                       # (N, C, 3)
+    dist_c    = np.linalg.norm(cands_np - labels[:, np.newaxis, :], axis=-1) # (N, C)
+    oracle_idx  = dist_c.argmin(axis=1)            # (N,)
+    oracle_dist = dist_c.min(axis=1)               # (N,)
+    is_oracle_hit = oracle_dist <= R_HIT_THRESHOLD  # (N,) bool
+
+    N = len(ids)
+    all_logits = np.full((N, N_CANDIDATES), -np.inf, dtype=np.float32)
+    for fold_idx, model in models.items():
+        model.eval()
+        val_mask = np.array([fold_id(i) == fold_idx for i in ids])
+        val_arr  = coords[val_mask]
+        val_idx  = np.where(val_mask)[0]
+        for start in range(0, len(val_arr), BATCH_SIZE):
+            end = min(start + BATCH_SIZE, len(val_arr))
+            c = torch.tensor(val_arr[start:end]).to(device)
+            with torch.no_grad():
+                cands_t = make_candidates_gpu(c)
+                seq_t   = make_seq_features_gpu(c)
+                cand_t  = make_cand_features_gpu(c, cands_t)
+                logits  = model(seq_t, cand_t)
+            all_logits[val_idx[start:end]] = logits.cpu().numpy()
+
+    # Oracle rank (0-based: 0 = top-1)
+    sorted_idx  = np.argsort(-all_logits, axis=1)            # (N, C)
+    oracle_rank = (sorted_idx == oracle_idx[:, np.newaxis]).argmax(axis=1)  # (N,)
+
+    print(f"  Oracle candidate rank statistics:")
+    print(f"    mean={oracle_rank.mean():.1f}  median={np.median(oracle_rank):.0f}"
+          f"  p75={np.percentile(oracle_rank, 75):.0f}  p90={np.percentile(oracle_rank, 90):.0f}")
+    for k in [1, 3, 5, 7]:
+        rate = float(np.mean(oracle_rank < k))
+        print(f"  Oracle in Top-{k}: {rate:.4f}")
+
+    # Softmax weights (numerically stable)
+    logits_shifted = all_logits - all_logits.max(axis=1, keepdims=True)
+    exp_l   = np.exp(logits_shifted)
+    weights = exp_l / exp_l.sum(axis=1, keepdims=True)                       # (N, C)
+
+    def topk_pred(mask, k):
+        idx_g = np.argsort(-all_logits[mask], axis=1)[:, :k]
+        n_g   = mask.sum()
+        w_g   = weights[mask][np.arange(n_g)[:, None], idx_g]
+        w_g   = w_g / w_g.sum(axis=1, keepdims=True)
+        c_g   = cands_np[mask][np.arange(n_g)[:, None], idx_g]
+        return (c_g * w_g[:, :, np.newaxis]).sum(axis=1)
+
+    oracle_in_top5 = oracle_rank < 5
+    groups = {
+        "A: oracle hit & in top-5   ": is_oracle_hit  & oracle_in_top5,
+        "B: oracle hit & NOT top-5  ": is_oracle_hit  & ~oracle_in_top5,
+        "C: oracle miss (cand limit)": ~is_oracle_hit,
+    }
+    print()
+    for name, mask in groups.items():
+        n = int(mask.sum())
+        if n == 0:
+            print(f"  {name}: 0 샘플")
+            continue
+        h1 = float(np.mean(np.linalg.norm(topk_pred(mask, 1) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
+        h5 = float(np.mean(np.linalg.norm(topk_pred(mask, 5) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
+        print(f"  {name}: {n:5d}샘플 ({mask.mean():.1%}) | Top-1 hit={h1:.4f}  Top-5 hit={h5:.4f}")
+
+    print()
+    print("  해석 가이드:")
+    n_b = int((is_oracle_hit & ~oracle_in_top5).sum())
+    n_a = int((is_oracle_hit & oracle_in_top5).sum())
+    if n_b > n_a * 0.3:
+        print("  → B그룹 비중 높음: selector가 oracle 후보를 top-5 밖으로 밀어냄 → 학습/손실 개선 필요")
+    else:
+        print("  → B그룹 비중 낮음: selector ranking은 양호")
+    # Check if top-1 > top-5 in group A (averaging hurts)
+    h1_a = float(np.mean(np.linalg.norm(
+        topk_pred(is_oracle_hit & oracle_in_top5, 1) - labels[is_oracle_hit & oracle_in_top5],
+        axis=-1) <= R_HIT_THRESHOLD)) if n_a > 0 else 0
+    h5_a = float(np.mean(np.linalg.norm(
+        topk_pred(is_oracle_hit & oracle_in_top5, 5) - labels[is_oracle_hit & oracle_in_top5],
+        axis=-1) <= R_HIT_THRESHOLD)) if n_a > 0 else 0
+    if h1_a > h5_a + 0.01:
+        print("  → A그룹: Top-1 > Top-5 → 가중 평균이 성능을 깎음 → topk=1 검토")
+    elif h5_a > h1_a + 0.01:
+        print("  → A그룹: Top-5 > Top-1 → 가중 평균이 유효 → topk 유지")
+    else:
+        print("  → A그룹: Top-1 ≈ Top-5 → 가중 평균 영향 미미")
+
+
 def analyze():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
@@ -172,9 +268,15 @@ def analyze():
             best_blend, best_alpha = h, alpha
         print(f"  α={alpha:.1f}: {h:.4f}{marker}")
 
-    # ── 4. TTA 효과 ───────────────────────────────────────────────
+    # ── 4. Selector error decomposition ──────────────────────────
     print("\n" + "=" * 55)
-    print("4. TTA  (Test-Time Augmentation, OOF)")
+    print("4. SELECTOR ERROR DECOMPOSITION")
+    print("=" * 55)
+    oracle_selector_decomposition(models, ids, coords, labels, device)
+
+    # ── 5. TTA 효과 ───────────────────────────────────────────────
+    print("\n" + "=" * 55)
+    print("5. TTA  (Test-Time Augmentation, OOF)")
     print("=" * 55)
     print("  계산 중... (fold × n_tta 배치 실행)")
     tta_preds = tta_oof_preds(models, ids, coords, device, n_tta=8, topk=best_k)
@@ -183,7 +285,7 @@ def analyze():
 
     # ── 6. Boundary MLP ───────────────────────────────────────────
     print("\n" + "=" * 55)
-    print("5. BOUNDARY MLP 효과")
+    print("6. BOUNDARY MLP 효과")
     print("=" * 55)
     bpath = OUTPUT_DIR / "boundary.pt"
     if bpath.exists():
@@ -201,7 +303,7 @@ def analyze():
 
     # ── 7. 요약 ───────────────────────────────────────────────────
     print("\n" + "=" * 55)
-    print("6. 요약")
+    print("7. 요약")
     print("=" * 55)
     selector_hit = r_hit(p3, labels)
     print(f"  Physics baseline       : {phys_hit:.4f}")
