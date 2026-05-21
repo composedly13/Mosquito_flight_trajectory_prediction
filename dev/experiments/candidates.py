@@ -70,6 +70,27 @@ CANDIDATES = [
     CandidateSpec("jerk_med_neg",      1.98,  0.90, -0.05, jerk=-0.15),
     CandidateSpec("latency_s088",      1.98,  0.96, -0.08, time_scale=0.88),
     CandidateSpec("latency_l112",      1.98,  0.96, -0.08, time_scale=1.12),
+
+    # 급격한 방향 전환 커버리지 확장 (oracle miss 케이스 대응)
+    CandidateSpec("turn_p030",         2.00,  0.80,  0.30),
+    CandidateSpec("turn_n030",         2.00,  0.80, -0.30),
+    CandidateSpec("turn_p045",         1.96,  0.70,  0.45),
+    CandidateSpec("turn_n045",         1.96,  0.70, -0.45),
+    CandidateSpec("turn_p060",         1.90,  0.55,  0.60),
+    CandidateSpec("turn_n060",         1.90,  0.55, -0.60),
+
+    # 강한 Jerk 커버리지
+    CandidateSpec("jerk_l_pos",        1.98,  0.88,  0.00, jerk= 0.30),
+    CandidateSpec("jerk_l_neg",        1.98,  0.88,  0.00, jerk=-0.30),
+    CandidateSpec("jerk_xl_pos",       1.96,  0.82,  0.00, jerk= 0.50),
+    CandidateSpec("jerk_xl_neg",       1.96,  0.82,  0.00, jerk=-0.50),
+
+    # Turn + Jerk 복합
+    CandidateSpec("tj_pp20",           1.98,  0.85,  0.20, jerk= 0.20),
+    CandidateSpec("tj_np20",           1.98,  0.85, -0.20, jerk= 0.20),
+    CandidateSpec("tj_pn20",           1.98,  0.85,  0.20, jerk=-0.20),
+    CandidateSpec("tj_nn20",           1.98,  0.85, -0.20, jerk=-0.20),
+    CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
 ]
 
 N_CANDIDATES = len(CANDIDATES)
@@ -82,7 +103,7 @@ def _family_id(name: str) -> int:
     if name.startswith("latency"):    return 5
     if "jerk" in name:                return 4
     if any(x in name for x in ["fast", "slow", "par070", "par120", "par110",
-                                 "par075", "par105"]):
+                                 "par075", "par105", "turn_", "tj_"]):
         return 3
     return 2
 

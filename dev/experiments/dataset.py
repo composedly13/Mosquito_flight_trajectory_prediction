@@ -24,28 +24,34 @@ def load_all(data_dir: Path, labels_path: Path = None):
     return ids, coords, labels
 
 
-def augment_batch_gpu(coords: torch.Tensor, labels: torch.Tensor):
-    """Random SO3 rotation on GPU. coords: (B,11,3), labels: (B,3)"""
+def _build_rotation_matrices(coords: torch.Tensor):
+    """Uniformly random SO3 rotation matrices. Returns R: (B, 3, 3)."""
     B, dev, dt = coords.shape[0], coords.device, coords.dtype
     u  = torch.rand(B, 3, device=dev, dtype=dt)
     s1 = (1 - u[:, 0]).sqrt()
     s0 = u[:, 0].sqrt()
     p2 = 2 * torch.pi
-
     qw = s1 * (p2 * u[:, 1]).sin()
     qx = s1 * (p2 * u[:, 1]).cos()
     qy = s0 * (p2 * u[:, 2]).sin()
     qz = s0 * (p2 * u[:, 2]).cos()
-
-    R = torch.stack([
+    return torch.stack([
         1-2*(qy*qy+qz*qz),  2*(qx*qy-qw*qz),  2*(qx*qz+qw*qy),
           2*(qx*qy+qw*qz),  1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx),
           2*(qx*qz-qw*qy),    2*(qy*qz+qw*qx), 1-2*(qx*qx+qy*qy),
     ], dim=-1).view(B, 3, 3)
 
-    coords_r = torch.bmm(coords, R.mT)
-    labels_r = (labels[:, None] @ R.mT).squeeze(1)
-    return coords_r, labels_r
+
+def augment_batch_gpu(coords: torch.Tensor, labels: torch.Tensor):
+    """Random SO3 rotation on GPU. coords: (B,11,3), labels: (B,3)"""
+    R = _build_rotation_matrices(coords)
+    return torch.bmm(coords, R.mT), (labels[:, None] @ R.mT).squeeze(1)
+
+
+def augment_batch_gpu_with_R(coords: torch.Tensor):
+    """Random SO3 rotation. Returns (coords_rotated, R) — R needed to undo rotation for TTA."""
+    R = _build_rotation_matrices(coords)
+    return torch.bmm(coords, R.mT), R
 
 
 class MosquitoDataset(Dataset):

@@ -23,9 +23,11 @@ NHEAD       = 4
 NUM_LAYERS  = 3
 DROPOUT     = 0.1
 
-# Boundary MLP
-BOUNDARY_LO = 0.005    # 0.5cm  이하: 이미 해결
-BOUNDARY_HI = 0.025    # 2.5cm  이상: 복구 불가
+# Boundary MLP — R-Hit@1cm 기준으로 실제 도움이 되는 범위만
+# 0.9cm 미만: 이미 hit, 건드리면 miss로 바뀔 수 있음
+# 1.3cm 초과: 6mm 보정으로 1cm 이하 달성 불가
+BOUNDARY_LO = 0.009    # 0.9cm
+BOUNDARY_HI = 0.013    # 1.3cm
 CORRECTION_CAP = 0.006 # 최대 보정량 6mm
 
 # Metric

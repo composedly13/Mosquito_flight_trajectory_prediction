@@ -84,15 +84,25 @@ def predict():
     all_preds  = np.concatenate(all_preds,  axis=0)   # (N, 3)
     all_coords = np.concatenate(all_coords, axis=0)   # (N, 11, 3)
 
-    all_preds = apply_boundary(boundary, all_coords, all_preds, device)
-
     sub = pd.read_csv(SUBMISSION_PATH, index_col="id")
-    df  = pd.DataFrame(all_preds, index=ids, columns=sub.columns)
-    df.index.name = "id"
 
-    out_path = OUTPUT_DIR / "submission.csv"
-    df.to_csv(out_path)
-    print(f"Submission saved: {out_path}  ({N} rows)")
+    def save_csv(preds: np.ndarray, name: str):
+        df = pd.DataFrame(preds, index=ids, columns=sub.columns)
+        df.index.name = "id"
+        path = OUTPUT_DIR / name
+        df.to_csv(path)
+        print(f"  {path}  ({N} rows)")
+
+    print("\n[제출 파일 생성]")
+
+    # 1. boundary 없는 버전 (권장)
+    save_csv(all_preds, "submission.csv")
+
+    # 2. boundary 적용 버전 (비교용)
+    if boundary is not None:
+        corrected = apply_boundary(boundary, all_coords, all_preds, device)
+        save_csv(corrected, "submission_boundary.csv")
+        print("  ※ boundary 효과는 analyze.py로 OOF 검증 후 제출 결정 권장")
 
 
 if __name__ == "__main__":

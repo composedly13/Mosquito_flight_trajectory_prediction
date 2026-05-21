@@ -10,7 +10,7 @@ import hashlib
 from config import *
 from dataset import load_all, MosquitoDataset, augment_batch_gpu
 from model import CandidateSelector, soft_labels, selector_predict
-from candidates import N_CANDIDATES, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
+from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 from boundary import train_boundary, apply_boundary
 
 
@@ -147,6 +147,15 @@ def train():
 
     oof_hit = r_hit(oof_preds, labels)
     print(f"OOF R-Hit (selector only): {oof_hit:.4f}")
+
+    # Oracle: 후보군 상한선 진단
+    oracle_cands = make_candidates(coords)                              # (N, C, 3)
+    min_dists    = np.linalg.norm(
+        oracle_cands - labels[:, np.newaxis, :], axis=-1
+    ).min(axis=1)
+    oracle_hit_score = float(np.mean(min_dists <= R_HIT_THRESHOLD))
+    print(f"Oracle R-Hit ({N_CANDIDATES} candidates): {oracle_hit_score:.4f}"
+          f"  (selector efficiency: {oof_hit / oracle_hit_score:.1%})")
 
     # Save selector models
     for i, state in enumerate(all_states):

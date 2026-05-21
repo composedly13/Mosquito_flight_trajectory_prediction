@@ -270,3 +270,54 @@ python dev/experiments/predict.py
   - `train.py`, `predict.py` 루프 업데이트
 - 결과: feature 계산 140ms → 5.6ms (배치 256 기준, **25x 향상**)
 - 수치 동일성: numpy 대비 최대 오차 7.6e-06 (float32 정밀도 수준)
+
+### 2026-05-22
+
+**[analyze.py 결과 — 현재 모델 진단]**
+- Oracle R-Hit (35 candidates 상한선): **72.18%**
+- Selector efficiency: **89.1%** (OOF 64.28% / Oracle 72.18%)
+- Physics blend: α=1.0(모델 단독)이 최고 → physics blend 불필요
+- Top-k: Top-3 최적 (Top-1: 0.6358 / Top-3: 0.6428 / Top-5: 0.6423)
+- Boundary MLP: **-7.22%** (0.6428 → 0.5706) → 심각한 성능 저하, 즉시 제거
+
+**[Boundary MLP 원인 분석 및 수정]**
+- 문제: BOUNDARY_LO=0.5cm, BOUNDARY_HI=2.5cm → 55.6% 샘플을 보정 시도
+  - 0.5~1.0cm 구간: 이미 hit인 샘플을 miss로 바꿀 위험
+  - 1.0~2.5cm 구간: 최대 6mm 보정으로는 1cm 이하 달성 불가
+- 수정: 범위를 BOUNDARY_LO=0.9cm, BOUNDARY_HI=1.3cm으로 축소 (재학습 필요)
+- predict.py: boundary 없는 버전을 submission.csv 기본으로, boundary 버전은 submission_boundary.csv 별도 저장
+
+**[후보군 확장 35 → 50개]**
+- Oracle 72.18% 기준, 70% 목표 달성에는 후보군 확장이 필수
+  - 기존 |perp| 최대 0.20 → 급격한 방향 전환 케이스 미커버
+  - 기존 |jerk| 최대 0.15 → 강한 순간 가속도 미커버
+- 추가: turn 계열 6개 (|perp| 0.30~0.60), jerk 계열 4개 (|jerk| 0.30~0.50), turn+jerk 복합 5개
+- 재학습 후 oracle 상한선 상승 예상 (74~76% 목표)
+
+**[TTA 구현 (Test-Time Augmentation)]**
+- augment_batch_gpu_with_R 추가 (dataset.py) — rotation matrix R 반환
+- analyze.py에 TTA×8 OOF 평가 섹션 추가 — 재학습 없이 selector efficiency 개선 측정
+- 기대 효과: +0.5~1.5% (훈련 시 SO3 증강을 사용했으므로 회전 불변성 있음)
+
+**[analyze.py 재실행 — 50개 후보 진단 결과]**
+
+| 항목 | 35 candidates | 50 candidates |
+|---|---|---|
+| Oracle R-Hit | 72.18% | **74.89%** (+2.71pp) |
+| Selector efficiency | 89.1% | 85.3%* |
+| oracle↔selector 갭 | 7.9pp | 11.0pp* |
+| Top-k 최적 | 3 | 5 |
+| TTA×8 효과 | - | 없음 (±0.00%) |
+| Best physics blend | α=1.0 | α=0.7 (+0.0001pp, 사실상 없음) |
+
+\* 기존 모델이 35개 후보로 학습되어 새 15개 후보 평가 불안정 → 재학습 후 회복 예상
+
+**[TTA 효과 없는 이유]**
+- SO3 훈련 증강으로 모델이 회전 불변에 가까움 → rotate→predict→unrotate ≈ predict
+- TTA는 회전 불변이 불완전할 때 효과 있음 → 현재 구조에서는 의미 없음
+
+**[현 시점 목표 계산]**
+- Oracle 74.89%, 재학습 후 selector efficiency 89% 회복 시: 74.89% × 89% ≈ **66.7%**
+- selector efficiency 93% 달성 시: 74.89% × 93% ≈ **69.6%**
+- 70% 달성 조건: efficiency ≥ 93.5% (74.89% × 93.5% = 70.0%)
+- 다음 실험 방향: 50개 후보로 재학습 → CV 확인 → selector 개선 (증강/손실/구조)
