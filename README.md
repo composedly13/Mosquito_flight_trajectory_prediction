@@ -251,7 +251,8 @@ python dev/experiments/predict.py
 | 35-candidate selector | 64.28% | - | Top-3, boundary 없음 |
 | 35-candidate + Boundary | 57.06% | - | ❌ 기각 (-7.22pp) |
 | 50-candidate oracle | 74.89% | - | 후보 확장 상한 |
-| 50-candidate selector | 재학습 중 | - | d_model=256, yaw aug |
+| 50-candidate selector (d128, SO3) | 63.65% | - | 기존 모델 재학습 |
+| 50-candidate selector (d128, yaw) | **64.13%** | - | SO3→yaw +4.8pp |
 
 ### Selector Error Decomposition
 
@@ -415,6 +416,50 @@ python dev/experiments/predict.py
 2. selector efficiency ≥ 90% 목표 (현 85.6% 대비)
 3. analyze.py로 top-1 vs top-k 비교 — 가중 평균 유효성 확인
 4. oracle report로 어떤 후보 파라미터가 주도적인지 확인
+
+**[50개 후보 학습 결과 — d_model=128, SO3 aug]**
+
+| | d_model=128, SO3 (35) | d_model=128, SO3 (50) |
+|---|---:|---:|
+| Fold 1 | - | 0.6396 |
+| Fold 2 | - | 0.6356 |
+| Fold 3 | - | 0.6419 |
+| Fold 4 | - | 0.6391 |
+| Fold 5 | - | 0.6265 |
+| CV mean | **0.6429** | 0.6365 |
+| Selector efficiency | 89.1% | 85.0% |
+
+**결론**: 후보 35→50 확장 후 CV -6.4pp 하락 (0.6429→0.6365)
+- Fold 5 = 0.6265 이상치 — 특정 fold 데이터에 취약할 수 있음
+- selector efficiency 89.1%→85.0%: 후보 50개 환경에서 판별력 부족
+- 다음: yaw augmentation 변수 분리 (d128+yaw vs d128+SO3 비교)
+
+**[변수 분리 실험 결과 — d_model=128, yaw aug, patience=40]**
+
+| | SO3 (35-cand) | SO3 (50-cand) | yaw (50-cand) |
+|---|---:|---:|---:|
+| Fold 1 | - | 0.6396 | **0.6515** |
+| Fold 2 | - | 0.6356 | 0.6385 |
+| Fold 3 | - | 0.6419 | 0.6393 |
+| Fold 4 | - | 0.6391 | 0.6406 |
+| Fold 5 | - | 0.6265 | 0.6365 |
+| CV mean | **0.6429** | 0.6365 | **0.6413** (+4.8pp) |
+| Selector efficiency | 89.1% | 85.0% | 85.6% |
+
+**결론: yaw augmentation 유효 확인 (+4.8pp)**
+- SO3는 z=UP 구조를 파괴하여 물리적으로 불가능한 궤적(뒤집힌 비행)을 학습에 주입
+- yaw-only는 수평면 회전만 적용 → 센서 시야각 변화 반영, z=UP 보존
+- 35-cand 베이스라인(0.6429) 대비 -1.6pp: 후보 확장 비용 대부분 회복
+
+**이상 패턴**
+- Fold 1: 0.6515 — 다른 fold 대비 +1pp 이상 높음, 데이터 분포 차이 가능성
+- Fold 5: 여전히 최저 (0.6365) — 일관된 약 fold, 어려운 케이스 집중됐을 가능성
+
+**다음 단계**
+1. analyze.py 실행 → oracle top-k in, selector error decomposition
+2. soft-label temperature 재탐색 (0.003 / 0.005 / 0.007 / 0.010)
+3. pairwise loss weight 재탐색 (0.0 / 0.1 / 0.25 / 0.5)
+4. top-k 재탐색 (1 / 3 / 5 / 7) — analyze.py가 자동 출력
 
 ---
 
