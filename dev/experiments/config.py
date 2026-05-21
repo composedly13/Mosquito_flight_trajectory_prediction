@@ -15,12 +15,16 @@ BATCH_SIZE  = 256
 EPOCHS      = 200
 LR          = 3e-4
 WEIGHT_DECAY = 1e-4
-PATIENCE    = 30        # early stopping
+PATIENCE    = 50        # early stopping (larger model needs more epochs)
+
+# Augmentation: 'so3' (random 3D rotation) | 'yaw' (z-axis rotation only) | 'none'
+# 'yaw' is safer when z=UP has physical meaning (LiDAR coordinate frame)
+AUG_MODE    = 'yaw'
 
 # Selector Model (Transformer)
-D_MODEL     = 128
-NHEAD       = 4
-NUM_LAYERS  = 3
+D_MODEL     = 256       # was 128; 50-candidate discrimination needs more capacity
+NHEAD       = 8         # was 4
+NUM_LAYERS  = 4         # was 3
 DROPOUT     = 0.1
 
 # Boundary MLP — R-Hit@1cm 기준으로 실제 도움이 되는 범위만

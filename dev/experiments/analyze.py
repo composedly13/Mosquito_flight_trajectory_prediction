@@ -90,6 +90,26 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
     return preds
 
 
+def candidate_oracle_report(coords: np.ndarray, labels: np.ndarray) -> tuple:
+    """Detailed oracle analysis: percentiles, top oracle candidate indices."""
+    cands     = make_candidates(coords)                              # (N, C, 3)
+    dist      = np.linalg.norm(cands - labels[:, np.newaxis, :], axis=-1)  # (N, C)
+    best_dist = dist.min(axis=1)                                     # (N,)
+    best_idx  = dist.argmin(axis=1)                                  # (N,)
+    oracle_hit = float(np.mean(best_dist <= R_HIT_THRESHOLD))
+
+    pcts = np.percentile(best_dist * 100, [50, 75, 90, 95])
+    print(f"  Oracle R-Hit@1cm   : {oracle_hit:.4f}")
+    print(f"  Best dist mean     : {best_dist.mean() * 100:.4f} cm")
+    print(f"  Percentiles (cm)   : p50={pcts[0]:.3f}  p75={pcts[1]:.3f}"
+          f"  p90={pcts[2]:.3f}  p95={pcts[3]:.3f}")
+
+    uniq, cnts = np.unique(best_idx, return_counts=True)
+    top10 = sorted(zip(uniq.tolist(), cnts.tolist()), key=lambda x: -x[1])[:10]
+    print(f"  Top oracle cand idx: {top10}")
+    return oracle_hit, best_dist, best_idx
+
+
 def analyze():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
@@ -112,15 +132,9 @@ def analyze():
     print("=" * 55)
     print(f"1. ORACLE HIT  (후보군 상한선, N={N_CANDIDATES})")
     print("=" * 55)
-    oracle_cands = make_candidates(coords)                    # (N, C, 3)
-    min_dist = np.linalg.norm(
-        oracle_cands - labels[:, np.newaxis, :], axis=-1
-    ).min(axis=1)                                             # (N,)
-    oracle   = float(np.mean(min_dist <= R_HIT_THRESHOLD))
     phys_hit = r_hit(physics_pred(coords), labels)
-
     print(f"Physics baseline (β=0.6)              : {phys_hit:.4f}")
-    print(f"Oracle R-Hit (best of {N_CANDIDATES} candidates) : {oracle:.4f}")
+    oracle, min_dist, _ = candidate_oracle_report(coords, labels)
     print()
     if oracle < 0.68:
         print("→ 후보군 자체가 병목. 후보 수/파라미터 확장 필요.")
@@ -134,10 +148,11 @@ def analyze():
     print("2. TOP-K 비교  (OOF)")
     print("=" * 55)
     topk_preds = {}
-    for k in [1, 2, 3, 5]:
+    for k in [1, 2, 3, 5, N_CANDIDATES]:
         p = get_oof_preds(models, ids, coords, device, topk=k)
         topk_preds[k] = p
-        print(f"  Top-{k}: {r_hit(p, labels):.4f}")
+        label = f"Top-{k}" if k < N_CANDIDATES else f"Top-all({N_CANDIDATES})"
+        print(f"  {label}: {r_hit(p, labels):.4f}")
 
     best_k = max(topk_preds, key=lambda k: r_hit(topk_preds[k], labels))
     print(f"\n  → 최적 k: {best_k}")

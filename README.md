@@ -321,3 +321,80 @@ python dev/experiments/predict.py
 - selector efficiency 93% 달성 시: 74.89% × 93% ≈ **69.6%**
 - 70% 달성 조건: efficiency ≥ 93.5% (74.89% × 93.5% = 70.0%)
 - 다음 실험 방향: 50개 후보로 재학습 → CV 확인 → selector 개선 (증강/손실/구조)
+
+**[50개 후보 재학습 결과]**
+
+| | 35 candidates | 50 candidates |
+|---|---|---|
+| CV mean R-Hit | **0.6429** | 0.6410 (-0.19pp) |
+| Oracle | 72.18% | **74.89%** (+2.71pp) |
+| Selector efficiency | **89.1%** | 85.6% (-3.5pp) |
+| Boundary samples | 55.6% | **16.6%** (범위 수정 효과 확인) |
+| Boundary 적용 후 OOF | 0.5706 | 0.5665 (여전히 심각) |
+
+**결론**: oracle은 상승했으나 selector efficiency 하락이 상쇄 → 순 -0.19pp
+- 원인: d_model=128, 3-layer Transformer의 용량이 50개 후보 선별에 부족
+- 35개 → 50개로 후보 늘어나면서 "비슷해 보이는 나쁜 후보"도 늘어남 → 더 강한 판별력 필요
+- Boundary MLP: 범위 수정(55.6%→16.6%) 후에도 -7.45% → 피처/구조 자체가 한계
+
+**Boundary MLP 평가 종료**
+- 피처 12개 / hidden 64 구조로는 올바른 보정 방향 학습 불가
+- OOF 정확한 보정 방향 학습 어려움 (오차 벡터 방향이 랜덤에 가까움)
+- 이후 실험에서 제외, predict.py 기본값 유지 (boundary 미적용)
+
+**[다음 실험: 모델 용량 확대]**
+- 목표: selector efficiency 85.6% → 93%+ (50개 후보 환경에서)
+- 변경: d_model 128→256, num_layers 3→4
+- 기대: 74.89% × 93% ≈ 69.6% → 70% 달성 근접
+- 추가 고려: patience 30→50 (더 충분한 학습 기회)
+
+---
+
+### 2026-05-22 (2)
+
+**[코드 품질 개선 — 5개 이슈 검토 및 수정]**
+
+**이슈 1: scheduler.step() 위치 → 이미 올바름 (수정 불필요)**
+- train.py line 83: indent 8칸 (epoch loop 안, batch loop 밖)
+- `for batch in train_loader:` (line 61, indent 8칸), `optimizer.step()` (line 81, indent 12칸)
+- `scheduler.step()` (line 83, indent 8칸) → epoch당 1회 호출, CosineAnnealingLR T_max=EPOCHS와 정상 동기
+
+**이슈 2: SO3 증강 → yaw-only 증강으로 변경**
+- x=forward, y=left, **z=UP** 좌표계: z가 중력 반대 방향 의미 보유
+- SO3 전체 회전은 z=UP 구조를 파괴 → 물리적으로 불가능한 뒤집힌 궤적 생성 가능
+- dataset.py: `augment_batch_gpu_yaw()`, `augment_batch_gpu_yaw_with_R()` 추가
+- config.py: `AUG_MODE = 'yaw'` (옵션: 'so3' | 'yaw' | 'none')
+- train.py: AUG_MODE 설정값에 따라 증강 방식 선택
+
+**이슈 3: Top-k 비교에 top-all 추가**
+- analyze.py: k=[1, 2, 3, 5, N_CANDIDATES(50)] 비교 → weighted average vs argmax 효과 측정
+- Top-k가 top-1보다 높으면 가중 평균이 유효, 낮으면 단일 후보 선택이 유리
+
+**이슈 4: Oracle 상세 리포트 추가**
+- analyze.py: `candidate_oracle_report()` 함수 추가
+- 출력: oracle R-Hit, best dist 평균, 백분위수(p50/p75/p90/p95), top-10 oracle 후보 인덱스
+- 어떤 후보 파라미터가 실제 정답과 가장 가까운지 확인 가능
+
+**이슈 5: Boundary MLP 이중 저장 → 이미 구현됨**
+- predict.py: `submission.csv` (boundary 미적용, 기본), `submission_boundary.csv` (비교용)
+- 이미 이전 세션에서 구현 완료
+
+**[모델 설정 변경 (config.py)]**
+
+| 설정 | 이전 | 현재 |
+|---|---|---|
+| D_MODEL | 128 | **256** |
+| NHEAD | 4 | **8** |
+| NUM_LAYERS | 3 | **4** |
+| PATIENCE | 30 | **50** |
+| AUG_MODE | SO3 (하드코딩) | **'yaw'** (설정 가능) |
+
+- 파라미터 수: ~0.8M → ~3.2M (4배 증가)
+- yaw 증강으로 z=UP 좌표 보존
+- patience 50으로 대형 모델 충분한 학습 기회 부여
+
+**[다음 실험: 재학습 후 확인 사항]**
+1. CV R-Hit ≥ 0.67 목표 (현 0.6410 대비 +3pp)
+2. selector efficiency ≥ 90% 목표 (현 85.6% 대비)
+3. analyze.py로 top-1 vs top-k 비교 — 가중 평균 유효성 확인
+4. oracle report로 어떤 후보 파라미터가 주도적인지 확인

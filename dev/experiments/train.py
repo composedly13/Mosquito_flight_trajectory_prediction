@@ -8,7 +8,7 @@ from tqdm import tqdm
 import hashlib
 
 from config import *
-from dataset import load_all, MosquitoDataset, augment_batch_gpu
+from dataset import load_all, MosquitoDataset, augment_batch_gpu, augment_batch_gpu_yaw
 from model import CandidateSelector, soft_labels, selector_predict
 from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 from boundary import train_boundary, apply_boundary
@@ -62,7 +62,10 @@ def train_fold(
             coords_b = batch["coords"].to(device, non_blocking=True)
             true     = batch["label"].to(device, non_blocking=True)
 
-            coords_b, true = augment_batch_gpu(coords_b, true)
+            if AUG_MODE == 'so3':
+                coords_b, true = augment_batch_gpu(coords_b, true)
+            elif AUG_MODE == 'yaw':
+                coords_b, true = augment_batch_gpu_yaw(coords_b, true)
 
             cands  = make_candidates_gpu(coords_b)
             seq_f  = make_seq_features_gpu(coords_b)

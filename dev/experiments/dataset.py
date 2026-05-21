@@ -54,6 +54,33 @@ def augment_batch_gpu_with_R(coords: torch.Tensor):
     return torch.bmm(coords, R.mT), R
 
 
+def _build_yaw_matrices(coords: torch.Tensor):
+    """Random yaw (Z-axis) rotation matrices. Preserves z=UP direction. Returns R: (B, 3, 3)."""
+    B, dev, dt = coords.shape[0], coords.device, coords.dtype
+    theta = torch.rand(B, device=dev, dtype=dt) * 2 * torch.pi
+    cos_t = theta.cos()
+    sin_t = theta.sin()
+    ones  = torch.ones(B, device=dev, dtype=dt)
+    zeros = torch.zeros(B, device=dev, dtype=dt)
+    return torch.stack([
+        cos_t, -sin_t, zeros,
+        sin_t,  cos_t, zeros,
+        zeros,  zeros,  ones,
+    ], dim=-1).view(B, 3, 3)
+
+
+def augment_batch_gpu_yaw(coords: torch.Tensor, labels: torch.Tensor):
+    """Random yaw rotation on GPU. Safe for z=UP coordinate frames."""
+    R = _build_yaw_matrices(coords)
+    return torch.bmm(coords, R.mT), (labels[:, None] @ R.mT).squeeze(1)
+
+
+def augment_batch_gpu_yaw_with_R(coords: torch.Tensor):
+    """Random yaw rotation. Returns (coords_rotated, R) for TTA un-rotation."""
+    R = _build_yaw_matrices(coords)
+    return torch.bmm(coords, R.mT), R
+
+
 class MosquitoDataset(Dataset):
     def __init__(self, coords: np.ndarray, labels: np.ndarray = None, augment: bool = False):
         self.coords  = coords
