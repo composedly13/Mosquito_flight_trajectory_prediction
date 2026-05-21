@@ -161,9 +161,10 @@ pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jer
 | 셀렉터 | Attn-GRU | **Transformer + Cross-Attention** |
 | 후보 수 | 28개 | **35개** |
 | 학습 | 단일 모델 | **5-Fold 앙상블** |
-| 증강 | 없음 | **SO3 3D 회전** |
+| 증강 | 없음 | **SO3 3D 회전 (GPU 배치)** |
 | 손실 | CE | **Soft-label CE + Pairwise ranking** |
 | Boundary | 전체 데이터 | **OOF만 사용** |
+| Feature 계산 | CPU per-sample | **GPU 배치 연산 (25x 빠름)** |
 
 ---
 
@@ -201,9 +202,12 @@ pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jer
 ```bash
 conda create -n mosquito python=3.11 -y
 conda activate mosquito
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install numpy pandas tqdm scikit-learn
+# CUDA 12.8 (RTX 5080 / Blackwell 이상)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+pip install numpy pandas tqdm scikit-learn matplotlib
 ```
+
+> CUDA 12.4 환경(Ampere/Ada 이하)은 `cu124`로 변경
 
 Windows에서 OMP 중복 경고 발생 시:
 ```powershell
@@ -244,3 +248,26 @@ python dev/experiments/predict.py
 | 물리 베이스라인 (β=0.6) | 60.08% | - |
 | PB 참고 솔루션 | - | 68.22% |
 | CandidateSelector (ours) | 진행 중 | - |
+
+---
+
+## 개발 로그
+
+### 2026-05-21
+
+**[환경 구성]**
+- Anaconda `mosquito` 환경 생성 (Python 3.11)
+- GPU: RTX 5080 (Blackwell, CUDA 13.2 드라이버) 확인
+- PyTorch 2.11.0+cu128 설치 — Blackwell 아키텍처(sm_100) 대응 CUDA 12.8 빌드
+- 패키지: numpy, pandas, tqdm, matplotlib, scikit-learn
+
+**[GPU 연산 최적화]**
+- 문제: `MosquitoDataset.__getitem__`에서 샘플마다 numpy feature 계산 → CPU 병목
+  - 배치 256 기준 feature 계산: 140ms (샘플 1개씩 256회 순차 호출)
+- 해결: feature 계산 전체를 GPU 배치 연산으로 이전
+  - `make_candidates_gpu`, `make_seq_features_gpu`, `make_cand_features_gpu` 추가 (`candidates.py`)
+  - `augment_batch_gpu` 추가 — SO3 회전을 배치 단위로 GPU에서 수행 (`dataset.py`)
+  - `MosquitoDataset.__getitem__`은 raw coords만 반환, feature는 학습 루프에서 GPU 계산
+  - `train.py`, `predict.py` 루프 업데이트
+- 결과: feature 계산 140ms → 5.6ms (배치 256 기준, **25x 향상**)
+- 수치 동일성: numpy 대비 최대 오차 7.6e-06 (float32 정밀도 수준)
