@@ -299,6 +299,9 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 F: speed-scale 0.80~1.20 | 50 | — | — | — | — | ❌ E 실패로 건너뜀 |
 | 실험 G: Smart 50-cand (후보 교체) | 50★ | 64.73% | **77.02%** | 84.0% | 64.73% | Oracle +2.13pp, B-group↑ 실패 기준 |
 | **실험 G2**: Smart 50 + LML=0.10 | 50★ | **64.75%** | 77.02% | 84.1% | **64.75%** | Oracle rank 13.2, B-group 46.4%, temp=2.0 — 단일 seed 한계 |
+| G2 seed 123 | 50★ | 64.47% | 77.02% | 83.7% | 64.47% | seed 불안정 (Fold2=Fold3, 극단 후보 수렴 실패) |
+| **G2 seed 777** | 50★ | **64.87%** | 77.02% | **84.2%** | **64.87%** | **현재 최고 단일 seed** |
+| 3-seed 앙상블 (42+123+777) | 50★ | — | 77.02% | 84.0% | 64.68% | ❌ seed123 역효과 −0.07pp |
 
 ### Selector Error Decomposition
 
@@ -1296,3 +1299,50 @@ python dev/experiments/train.py --seed 777
 python dev/experiments/analyze.py --seeds 42 123 777   # 섹션 7에서 앙상블 OOF 확인
 python dev/experiments/predict.py --seeds 42 123 777   # 제출 파일 생성
 ```
+
+---
+
+### 2026-05-22 (13)
+
+**[Multi-seed Ensemble 결과 — 앙상블 역효과 분석]**
+
+3-seed 학습 완료 후 `analyze.py --seeds 42 123 777` 섹션 7 결과:
+
+**각 seed 개별 결과**
+
+| seed | Fold1 | Fold2 | Fold3 | Fold4 | Fold5 | OOF | Efficiency |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 42 | 0.6515 | 0.6517 | 0.6476 | 0.6470 | 0.6386 | 0.6475 | 84.1% |
+| 123 | 0.6530 | 0.6439 | 0.6439 | 0.6431 | 0.6396 | **0.6447** | 83.7% |
+| **777** | **0.6550** | **0.6488** | **0.6523** | **0.6485** | 0.6391 | **0.6487** | **84.2%** |
+
+**3-seed 앙상블 (logit 평균, 15 models)**
+
+| 지표 | 값 |
+|---|---|
+| Multi-seed OOF | **0.6468** (seed42=0.6475 대비 −0.07pp) |
+| Oracle ceiling | 77.02% |
+| Multi-seed efficiency | 84.0% |
+
+**판정: 앙상블 역효과 — seed 123이 끌어내림**
+
+원인: seed 123 OOF(0.6447)이 seed 42(0.6475), seed 777(0.6487) 대비 2~4pp 낮아 logit 평균이 best single seed를 하회. Fold 2·3이 동일값(0.6439)으로 수렴 — Smart 50 극단 후보(jerk_xxl, turn_p080, latency_s075)가 특정 random init에서 학습 불안정.
+
+**현재 best: seed 777 단독 (OOF 0.6487)**
+
+다음 시도: `--seeds 42 777` (seed 123 제외) 앙상블 OOF 확인
+- 기댓값: logit 상관성 감소로 0.6481~0.6490 예상
+- 제출 기준: 42+777 앙상블 OOF > 0.6487이면 앙상블, 아니면 seed 777 단독
+
+**갭 분석 및 Phase 5 방향**
+
+- 현재 best OOF: 0.6487 → LB ≈ 0.673 예상
+- 목표 LB 0.70 → OOF ≈ 0.675 필요, 잔여 갭 ~1.9pp
+- 단일 seed 튜닝 / multi-seed 방향 모두 소진 → **Phase 5 진입**
+- C그룹(23%) Top-10 hit = 0.0009 → selector 완전 실패 구간 → 직접 회귀 MLP 보완 가능성
+
+| 방식 | 설명 |
+|---|---|
+| 직접 회귀 MLP | 11개 시점 좌표 → 직접 (x,y,z) 예측 |
+| 혼합 기준 | selector logit entropy 높을 때(불확실) → 회귀 비중 증가 |
+| 기대 효과 | C그룹 23% 중 일부 포착 → +0.5~1.5pp |
