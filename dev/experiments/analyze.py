@@ -18,6 +18,7 @@ from candidates import (
     make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu,
     N_CANDIDATES, CANDIDATES,
 )
+from regression import RegMLP, entropy_blend, _make_features as _reg_features, _fold_id as _reg_fold_id
 
 
 def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
@@ -87,6 +88,28 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
                 pred    = selector_predict(logits, cands_t, topk=topk, temp=temp)
             preds[val_idx[start:end]] = pred.cpu().numpy()
     return preds
+
+
+def get_oof_logits(models: dict, ids: list, coords: np.ndarray,
+                   device: torch.device) -> np.ndarray:
+    """Return OOF raw selector logits (N, C)."""
+    N      = len(ids)
+    logits = np.full((N, N_CANDIDATES), -np.inf, dtype=np.float32)
+    for fold_idx, model in models.items():
+        model.eval()
+        val_mask = np.array([fold_id(i) == fold_idx for i in ids])
+        val_arr  = coords[val_mask]
+        val_pos  = np.where(val_mask)[0]
+        for start in range(0, len(val_arr), BATCH_SIZE):
+            end = min(start + BATCH_SIZE, len(val_arr))
+            c = torch.tensor(val_arr[start:end]).to(device)
+            with torch.no_grad():
+                cands_t = make_candidates_gpu(c)
+                seq_t   = make_seq_features_gpu(c)
+                cand_t  = make_cand_features_gpu(c, cands_t)
+                lgts    = model(seq_t, cand_t)
+            logits[val_pos[start:end]] = lgts.cpu().numpy()
+    return logits
 
 
 def load_all_models(seeds: list, device: torch.device) -> dict:
@@ -504,6 +527,53 @@ def analyze(seeds: list = None):
             print(f"  Multi-seed  OOF ({len(seeds)} seeds)  : {ms_hit:.4f}  ({(ms_hit - best_hit)*100:+.2f}pp)")
             print(f"  Oracle ceiling                 : {oracle:.4f}")
             print(f"  Multi-seed efficiency          : {ms_hit/oracle:.1%} of oracle")
+
+    # ── 8. Regression blend (RegMLP OOF가 있을 때) ───────────────
+    reg_oof_paths = [OUTPUT_DIR / f"seed{s}" / "regmlp_oof.npy" for s in seeds]
+    available = [p for p in reg_oof_paths if p.exists()]
+    if available:
+        print("\n" + "=" * 55)
+        print(f"8. REGRESSION ENTROPY BLEND  (β grid search)")
+        print("=" * 55)
+
+        # 회귀 OOF: 여러 seed 평균
+        reg_preds_list = [np.load(p) for p in available]
+        reg_oof = np.mean(reg_preds_list, axis=0)               # (N, 3)
+        reg_hit = r_hit(reg_oof, labels)
+        print(f"  Regression OOF (단독)       : {reg_hit:.4f}")
+
+        # Selector OOF logits (entropy 계산용)
+        print("  Selector OOF logits 계산 중...")
+        sel_logits = get_oof_logits(models, ids, coords, device)  # (N, C)
+        sel_preds  = topk_preds[best_k]                            # (N, 3)
+        sel_hit    = r_hit(sel_preds, labels)
+
+        # Entropy 분포 확인
+        probs_np = np.exp(sel_logits - sel_logits.max(axis=1, keepdims=True))
+        probs_np /= probs_np.sum(axis=1, keepdims=True)
+        H = -np.sum(probs_np * np.log(probs_np + 1e-9), axis=1) / np.log(N_CANDIDATES)
+        print(f"  Entropy H: mean={H.mean():.3f}  p25={np.percentile(H,25):.3f}"
+              f"  p75={np.percentile(H,75):.3f}  p95={np.percentile(H,95):.3f}")
+
+        # β grid search
+        print(f"\n  {'β':>5}  {'Blend OOF':>10}  {'vs Selector':>12}")
+        print(f"  {'-'*5}  {'-'*10}  {'-'*12}")
+        best_beta, best_blend_hit = 0.0, sel_hit
+        for beta in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0]:
+            blended = entropy_blend(sel_preds, reg_oof, sel_logits, beta=beta)
+            bh = r_hit(blended, labels)
+            marker = "  ← best" if bh > best_blend_hit else ""
+            if bh > best_blend_hit:
+                best_blend_hit, best_beta = bh, beta
+            print(f"  {beta:>5.1f}  {bh:.4f}      {(bh-sel_hit)*100:+.2f}pp{marker}")
+
+        print(f"\n  Selector OOF            : {sel_hit:.4f}")
+        print(f"  Best blend (β={best_beta:.1f}) OOF : {best_blend_hit:.4f}"
+              f"  ({(best_blend_hit-sel_hit)*100:+.2f}pp)")
+        print(f"  → 제출 권장: python predict.py --seeds {' '.join(map(str,seeds))} --beta {best_beta:.1f}")
+    else:
+        print("\n  [섹션 8 skip] RegMLP OOF 없음."
+              f" 먼저 실행: python regression.py --seed {seed}")
 
 
 if __name__ == "__main__":
