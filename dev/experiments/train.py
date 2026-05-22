@@ -11,7 +11,6 @@ from config import *
 from dataset import load_all, MosquitoDataset, augment_batch_gpu, augment_batch_gpu_yaw
 from model import CandidateSelector, soft_labels, selector_predict
 from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
-from boundary import train_boundary, apply_boundary
 
 
 def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
@@ -76,7 +75,7 @@ def train_fold(
 
             loss_ce   = -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
             loss_pair = pairwise_loss(logits, soft)
-            loss      = loss_ce + 0.25 * loss_pair
+            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
 
             optimizer.zero_grad()
             loss.backward()
@@ -152,8 +151,8 @@ def train():
     print(f"OOF R-Hit (selector only): {oof_hit:.4f}")
 
     # Oracle: 후보군 상한선 진단
-    oracle_cands = make_candidates(coords)                              # (N, C, 3)
-    min_dists    = np.linalg.norm(
+    oracle_cands     = make_candidates(coords)                         # (N, C, 3)
+    min_dists        = np.linalg.norm(
         oracle_cands - labels[:, np.newaxis, :], axis=-1
     ).min(axis=1)
     oracle_hit_score = float(np.mean(min_dists <= R_HIT_THRESHOLD))
@@ -163,15 +162,6 @@ def train():
     # Save selector models
     for i, state in enumerate(all_states):
         torch.save(state, OUTPUT_DIR / f"selector_fold{i}.pt")
-
-    # Train and save boundary MLP
-    print("\n=== Boundary MLP ===")
-    boundary_model = train_boundary(oof_preds, coords, labels, device)
-    if boundary_model is not None:
-        torch.save(boundary_model.state_dict(), OUTPUT_DIR / "boundary.pt")
-        corrected = apply_boundary(boundary_model, coords, oof_preds, device)
-        corrected_hit = r_hit(corrected, labels)
-        print(f"OOF R-Hit (with boundary): {corrected_hit:.4f}")
 
     print(f"\nModels saved to {OUTPUT_DIR}/")
 

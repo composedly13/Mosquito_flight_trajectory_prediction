@@ -36,6 +36,10 @@ BOUNDARY_LO = 0.009    # 0.9cm
 BOUNDARY_HI = 0.013    # 1.3cm
 CORRECTION_CAP = 0.006 # 최대 보정량 6mm
 
+# Loss hyperparameters
+SOFT_TEMP       = 0.005   # soft-label temperature (smaller = sharper targets)
+PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight
+
 # Metric
 R_HIT_THRESHOLD = 0.01
 EPS = 1e-8

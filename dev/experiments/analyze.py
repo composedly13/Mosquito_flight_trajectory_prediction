@@ -16,9 +16,8 @@ from model import CandidateSelector, selector_predict
 from candidates import (
     make_candidates,
     make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu,
-    N_CANDIDATES,
+    N_CANDIDATES, CANDIDATES,
 )
-from boundary import BoundaryMLP, apply_boundary
 
 
 def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
@@ -105,8 +104,22 @@ def candidate_oracle_report(coords: np.ndarray, labels: np.ndarray) -> tuple:
           f"  p90={pcts[2]:.3f}  p95={pcts[3]:.3f}")
 
     uniq, cnts = np.unique(best_idx, return_counts=True)
-    top10 = sorted(zip(uniq.tolist(), cnts.tolist()), key=lambda x: -x[1])[:10]
-    print(f"  Top oracle cand idx: {top10}")
+    cnt_map = dict(zip(uniq.tolist(), cnts.tolist()))
+    ranked = sorted(cnt_map.items(), key=lambda x: -x[1])
+
+    print(f"\n  {'idx':>3}  {'name':<30}  {'count':>6}  {'%':>6}")
+    print(f"  {'-'*3}  {'-'*30}  {'-'*6}  {'-'*6}")
+    never_used = []
+    for idx, cnt in ranked[:15]:
+        pct = cnt / len(best_idx) * 100
+        print(f"  {idx:>3}  {CANDIDATES[idx].name:<30}  {cnt:>6}  {pct:>5.1f}%")
+    for i in range(N_CANDIDATES):
+        if i not in cnt_map:
+            never_used.append(i)
+    if never_used:
+        print(f"\n  미사용 후보 ({len(never_used)}개): "
+              + ", ".join(f"{i}({CANDIDATES[i].name})" for i in never_used))
+
     return oracle_hit, best_dist, best_idx
 
 
@@ -244,7 +257,7 @@ def analyze():
     print("2. TOP-K 비교  (OOF)")
     print("=" * 55)
     topk_preds = {}
-    for k in [1, 2, 3, 5, N_CANDIDATES]:
+    for k in [1, 2, 3, 5, 7, 10, N_CANDIDATES]:
         p = get_oof_preds(models, ids, coords, device, topk=k)
         topk_preds[k] = p
         label = f"Top-{k}" if k < N_CANDIDATES else f"Top-all({N_CANDIDATES})"
@@ -283,38 +296,22 @@ def analyze():
     print(f"  Top-{best_k} no TTA  : {r_hit(topk_preds[best_k], labels):.4f}")
     print(f"  Top-{best_k} TTA×8   : {r_hit(tta_preds, labels):.4f}")
 
-    # ── 6. Boundary MLP ───────────────────────────────────────────
+    # ── 6. 요약 ───────────────────────────────────────────────────
     print("\n" + "=" * 55)
-    print("6. BOUNDARY MLP 효과")
+    print("6. 요약")
     print("=" * 55)
-    bpath = OUTPUT_DIR / "boundary.pt"
-    if bpath.exists():
-        bm = BoundaryMLP().to(device)
-        bm.load_state_dict(torch.load(bpath, map_location=device, weights_only=True))
-        corrected = apply_boundary(bm, coords, p3, device)
-        print(f"  Top-3 selector only : {r_hit(p3, labels):.4f}")
-        print(f"  Top-3 + Boundary    : {r_hit(corrected, labels):.4f}")
-        diff = r_hit(corrected, labels) - r_hit(p3, labels)
-        print(f"  차이                : {diff:+.4f}")
-        if diff < 0:
-            print("\n  → Boundary MLP 해로움. 제출 시 boundary 제거 권장.")
-    else:
-        print("  boundary.pt 없음")
-
-    # ── 7. 요약 ───────────────────────────────────────────────────
-    print("\n" + "=" * 55)
-    print("7. 요약")
-    print("=" * 55)
-    selector_hit = r_hit(p3, labels)
+    best_oof   = topk_preds[best_k]
+    best_hit   = r_hit(best_oof, labels)
+    selector_hit = r_hit(topk_preds.get(3, topk_preds[best_k]), labels)
     print(f"  Physics baseline       : {phys_hit:.4f}")
     print(f"  Oracle ceiling         : {oracle:.4f}")
-    print(f"  Selector (Top-3, OOF)  : {selector_hit:.4f}")
-    print(f"  Selector efficiency    : {selector_hit/oracle:.1%} of oracle")
+    print(f"  Selector (Top-{best_k}, OOF)  : {best_hit:.4f}")
+    print(f"  Selector efficiency    : {best_hit/oracle:.1%} of oracle")
     print(f"  Best blend (α={best_alpha:.1f})      : {best_blend:.4f}")
     print(f"  TTA×8                  : {r_hit(tta_preds, labels):.4f}")
-    gap = oracle - selector_hit
+    gap = oracle - best_hit
     print(f"\n  oracle↔selector 갭    : {gap:.4f}  ({gap*100:.1f}pp)")
-    print(f"  (oracle은 {N_CANDIDATES}개 후보 기준, 재학습 후 상승 가능)")
+    print(f"  70% 달성 조건          : efficiency ≥ {0.70/oracle:.1%}")
 
 
 if __name__ == "__main__":

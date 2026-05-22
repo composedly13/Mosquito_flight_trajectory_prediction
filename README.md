@@ -239,10 +239,11 @@ python dev/experiments/predict.py
 | Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Prediction | Top-k weighted average (최적 k는 analyze.py로 결정) |
-| Boundary MLP | **비활성화** (OOF -7.22pp, 기각됨) |
-| TTA | **비활성화** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.13%** (OOF, yaw aug 기준) |
+| Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
+| TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
+| CV R-Hit | **64.01%** (OOF, yaw aug, 50 candidates) |
 | Oracle ceiling | **74.89%** |
+| Selector efficiency | **85.5%** (목표: 93.5% → 70% 달성) |
 
 ---
 
@@ -267,7 +268,8 @@ python dev/experiments/predict.py
 | 35-candidate + Boundary | 57.06% | - | ❌ 기각 (-7.22pp) |
 | 50-candidate oracle | 74.89% | - | 후보 확장 상한 |
 | 50-candidate selector (d128, SO3) | 63.65% | - | 기존 모델 재학습 |
-| 50-candidate selector (d128, yaw) | **64.13%** | - | SO3→yaw +4.8pp |
+| 50-candidate selector (d128, yaw) | 64.13% | - | SO3→yaw +4.8pp |
+| 50-candidate selector (d128, yaw) re-run | **64.01%** | - | 재현 확인 (±0.12pp 노이즈) |
 
 ### Selector Error Decomposition
 
@@ -514,3 +516,60 @@ python dev/experiments/predict.py
   - C (oracle miss): 후보군 한계 → 후보 확장으로만 해결 가능
 - Oracle candidate rank 분포 (mean/median/p75/p90) 출력
 - 해석 가이드 자동 출력 (B 비중, Top-1 vs Top-5 우세 여부)
+
+---
+
+### 2026-05-22 (4)
+
+**[50개 후보 재학습 최종 진단 — d128+yaw 기준]**
+
+| | 35 candidates | 50 candidates |
+|---|---:|---:|
+| Oracle R-Hit | 72.18% | **74.89%** (+2.71pp) |
+| OOF R-Hit | **64.28%** | 64.01% (-0.27pp) |
+| Selector efficiency | **89.1%** | 85.5% (-3.6pp) |
+| Boundary 적용 후 | 57.06% | 56.08% |
+
+**결론: 50개 후보 확장은 실패에 가까움**
+- Oracle은 +2.71pp 상승했으나, selector efficiency 89.1% → 85.5%로 하락이 상쇄
+- 원인: 후보가 늘어날수록 "비슷해 보이는 나쁜 후보"도 증가 → classification 난이도 상승
+- d128 Transformer 용량으로는 50개 후보 환경에서 89%+ efficiency 달성 불가
+- d256으로 증가 시 오히려 CV 하락 (0.6413 → 0.6365): 10,000 샘플에서 과적합
+
+**Boundary MLP 완전 기각 및 제거**
+- 0.9~1.3cm 범위(17.1% 샘플)로 좁혔음에도 OOF -7.93pp (0.6401 → 0.5608)
+- 오차 벡터 방향이 랜덤에 가까워 학습 자체가 불가능한 구조적 한계
+- `train.py`에서 Boundary 학습/저장 블록 완전 삭제
+- `analyze.py`에서 Boundary 섹션 완전 삭제
+
+**[코드 리팩터링]**
+
+| 파일 | 변경 내용 |
+|---|---|
+| `config.py` | `SOFT_TEMP=0.005`, `PAIRWISE_WEIGHT=0.25` 파라미터 추출 |
+| `model.py` | `soft_labels()` temperature → config `SOFT_TEMP` 사용 |
+| `train.py` | `PAIRWISE_WEIGHT` config 연동, Boundary 블록 삭제 |
+| `analyze.py` | oracle 후보 기여도 테이블, Top-k 확장(7·10), 70% 달성 조건 자동 출력, Boundary 섹션 삭제 |
+
+**[다음 실험 계획]**
+
+**1순위: oracle 후보 기여도 분석 → 후보 수 최적화**
+- `analyze.py` 실행 후 미사용/저빈도 후보 확인
+- 목표: 40~45개 후보로 줄여 efficiency 89%+ 회복 (oracle 73~74% 유지)
+- 기대 OOF: 73.5% × 89% ≈ **65.5%**
+
+**2순위: soft-label temperature 탐색**
+- 후보 50개 환경에서 온도가 낮을수록(sharper) 모델 판별력 향상 가능성
+- `SOFT_TEMP`: 0.003 / 0.005 / 0.007 / 0.010
+
+**3순위: pairwise loss weight 탐색**
+- 후보 많을수록 ranking 손실의 중요도 변화
+- `PAIRWISE_WEIGHT`: 0.0 / 0.1 / 0.25 / 0.5
+
+**현실적 목표**
+
+| 단계 | 기대 CV |
+|---|---|
+| 후보 수 최적화 (40~45개) | 65~66% |
+| temp/pairwise 튜닝 | 66~67.5% |
+| 70% 달성 조건 | efficiency ≥ 93.5% (74.89% × 93.5% = 70.0%) |

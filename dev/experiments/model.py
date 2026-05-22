@@ -5,7 +5,7 @@ Sequence Transformer → Cross-Attention with candidates → logit per candidate
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT
+from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP
 
 SEQ_DIM  = 9
 CAND_DIM = 10
@@ -89,7 +89,7 @@ class CandidateSelector(nn.Module):
         return logits
 
 
-def soft_labels(cands: torch.Tensor, true: torch.Tensor, temp: float = 0.005) -> torch.Tensor:
+def soft_labels(cands: torch.Tensor, true: torch.Tensor, temp: float = SOFT_TEMP) -> torch.Tensor:
     """
     Distance-weighted soft targets over candidates.
     cands: (B, C, 3), true: (B, 3)
