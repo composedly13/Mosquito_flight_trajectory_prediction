@@ -62,8 +62,8 @@ class CandidateSelector(nn.Module):
 
     def forward(
         self,
-        seq_feat:  torch.Tensor,   # (B, 11, 9)
-        cand_feat: torch.Tensor,   # (B, C, 10)
+        seq_feat:  torch.Tensor,   # (B, 11, SEQ_DIM=11)
+        cand_feat: torch.Tensor,   # (B, C, CAND_DIM=10)
     ) -> torch.Tensor:             # (B, C) logits
 
         B = seq_feat.size(0)

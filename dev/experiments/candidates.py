@@ -160,7 +160,8 @@ def make_seq_features(x: np.ndarray) -> np.ndarray:
     """
     Sequence features for each of 11 time steps.
     x: (N, 11, 3)
-    returns: (N, 11, 9)
+    returns: (N, 11, 11)  — 11 features: speed, prev_speed_ratio, acc_norm, acc_par, acc_perp,
+                            jerk_norm, turn_cos, curvature, direction_flag, jerk_abs, acc_cos
     """
     N = x.shape[0]
     feats = []

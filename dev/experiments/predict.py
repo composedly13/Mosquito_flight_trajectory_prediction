@@ -50,8 +50,8 @@ def load_boundary(device: torch.device):
 
 def predict_batch(
     selectors: list,
-    seq_feat:  torch.Tensor,   # (B, 11, 9)
-    cand_feat: torch.Tensor,   # (B, C, 10)
+    seq_feat:  torch.Tensor,   # (B, 11, SEQ_DIM=11)
+    cand_feat: torch.Tensor,   # (B, C, CAND_DIM=10)
     cands:     torch.Tensor,   # (B, C, 3)
 ) -> np.ndarray:               # (B, 3)
     with torch.no_grad():

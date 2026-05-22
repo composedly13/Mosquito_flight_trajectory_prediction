@@ -290,6 +290,19 @@ def analyze(seed: int = SEED):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
 
+    # ── 실험 설정 요약 ────────────────────────────────────────────
+    print("=" * 55)
+    print("EXPERIMENT CONFIG")
+    print("=" * 55)
+    print(f"  seed={seed}  |  N_FOLDS={N_FOLDS}  |  N_CANDIDATES={N_CANDIDATES}")
+    print(f"  AUG_MODE={AUG_MODE}", end="")
+    if AUG_MODE == 'yaw_speed':
+        print(f"  scale={SPEED_SCALE_RANGE}  prob={SPEED_SCALE_PROB}", end="")
+    print()
+    print(f"  TOPK={TOPK}  |  LISTMLE_WEIGHT={LISTMLE_WEIGHT}  |  PAIRWISE_WEIGHT={PAIRWISE_WEIGHT}")
+    print(f"  D_MODEL={D_MODEL}  |  NUM_LAYERS={NUM_LAYERS}  |  DROPOUT={DROPOUT}")
+    print()
+
     # Models are saved in per-seed subdirectories by train.py
     model_dir = OUTPUT_DIR / f"seed{seed}"
     print(f"모델 디렉토리: {model_dir}  (seed={seed})")
