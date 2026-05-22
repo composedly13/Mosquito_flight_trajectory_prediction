@@ -14,7 +14,7 @@ from config import *
 from dataset import load_all, augment_batch_gpu_with_R
 from model import CandidateSelector, selector_predict
 from candidates import (
-    make_candidates,
+    make_candidates, motion_terms,
     make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu,
     N_CANDIDATES, CANDIDATES,
 )
@@ -68,7 +68,7 @@ def tta_oof_preds(models: dict, ids: list, coords: np.ndarray,
 
 
 def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
-                  device: torch.device, topk: int = 3) -> np.ndarray:
+                  device: torch.device, topk: int = 3, temp: float = 1.0) -> np.ndarray:
     N = len(ids)
     preds = np.zeros((N, 3), dtype=np.float32)
     for fold_idx, model in models.items():
@@ -84,7 +84,7 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
                 logits  = model(seq_t, cand_t)
-                pred    = selector_predict(logits, cands_t, topk=topk)
+                pred    = selector_predict(logits, cands_t, topk=topk, temp=temp)
             preds[val_idx[start:end]] = pred.cpu().numpy()
     return preds
 
@@ -121,6 +121,72 @@ def candidate_oracle_report(coords: np.ndarray, labels: np.ndarray) -> tuple:
               + ", ".join(f"{i}({CANDIDATES[i].name})" for i in never_used))
 
     return oracle_hit, best_dist, best_idx
+
+
+def c_group_analysis(coords: np.ndarray, labels: np.ndarray) -> None:
+    """
+    C그룹 분석: 후보 공간에 없는 케이스의 Frenet 파라미터 분포.
+    → 어떤 후보를 추가해야 oracle ceiling을 올릴 수 있는지 파악.
+    """
+    cands    = make_candidates(coords)                                       # (N, C, 3)
+    dist_all = np.linalg.norm(cands - labels[:, np.newaxis, :], axis=-1)   # (N, C)
+    best_dist = dist_all.min(axis=1)
+    best_idx  = dist_all.argmin(axis=1)
+    c_mask    = best_dist > R_HIT_THRESHOLD                                  # C그룹
+
+    n_c = int(c_mask.sum())
+    print(f"  C그룹: {n_c}개  ({c_mask.mean():.1%})")
+
+    c_dists = best_dist[c_mask] * 100
+    pcts = np.percentile(c_dists, [50, 75, 90, 95])
+    print(f"  nearest-cand dist  : mean={c_dists.mean():.2f}cm  "
+          f"p50={pcts[0]:.2f}  p75={pcts[1]:.2f}  p90={pcts[2]:.2f}  p95={pcts[3]:.2f}")
+
+    # Frenet frame 분해
+    p0, d1, d2, acc, jerk_vec = motion_terms(coords[c_mask], end_idx=10)
+    speed      = np.linalg.norm(d1, axis=1, keepdims=True).clip(EPS)  # (N_c, 1)
+    tangent    = d1 / speed
+    acc_par_s  = (acc * tangent).sum(axis=1, keepdims=True)
+    acc_perp_v = acc - acc_par_s * tangent
+    perp_mag   = np.linalg.norm(acc_perp_v, axis=1, keepdims=True).clip(EPS)
+    perp_unit  = acc_perp_v / perp_mag
+
+    delta   = labels[c_mask] - p0                          # true label displacement
+    t, t2   = 2.0, 4.0
+    speed_h = speed[:, 0] * t                              # expected displacement scale
+
+    # true label의 Frenet 투영 (후보 파라미터 스케일과 동일)
+    par_norm  = (delta * tangent).sum(axis=1) / (speed_h + EPS)
+    perp_norm = (delta * perp_unit).sum(axis=1) / (speed_h + EPS)
+    jerk_norm_c = np.linalg.norm(jerk_vec, axis=1) / (speed[:, 0] + EPS)
+
+    print(f"\n  True label (Frenet, speed×2 정규화):")
+    print(f"  par  : mean={par_norm.mean():.2f}  std={par_norm.std():.2f}  "
+          f"p5={np.percentile(par_norm,5):.2f}  p95={np.percentile(par_norm,95):.2f}")
+    print(f"  perp : mean={perp_norm.mean():.2f}  std={perp_norm.std():.2f}  "
+          f"|p5|={np.percentile(np.abs(perp_norm),5):.2f}  "
+          f"|p75|={np.percentile(np.abs(perp_norm),75):.2f}  "
+          f"|p95|={np.percentile(np.abs(perp_norm),95):.2f}")
+    print(f"  jerk : mean={jerk_norm_c.mean():.2f}  "
+          f"p75={np.percentile(jerk_norm_c,75):.2f}  p95={np.percentile(jerk_norm_c,95):.2f}")
+
+    # 현재 후보 파라미터 커버리지와 비교
+    cand_perp_max = max(abs(s.perp) for s in CANDIDATES)
+    cand_par_max  = max(s.par for s in CANDIDATES)
+    cand_jerk_max = max(abs(s.jerk) for s in CANDIDATES)
+    print(f"\n  현재 후보 커버리지: par=[0, {cand_par_max:.2f}]  "
+          f"|perp|≤{cand_perp_max:.2f}  |jerk|≤{cand_jerk_max:.2f}")
+
+    exceed_perp = float(np.mean(np.abs(perp_norm) > cand_perp_max))
+    exceed_par  = float(np.mean((par_norm > cand_par_max) | (par_norm < 0.3)))
+    print(f"  C그룹 중 |perp| 초과: {exceed_perp:.1%}")
+    print(f"  C그룹 중 par 범위 밖: {exceed_par:.1%}")
+
+    # C그룹 가장 가까운 후보 top-10
+    print(f"\n  C그룹 nearest 후보 분포 (top-10):")
+    uniq, cnts = np.unique(best_idx[c_mask], return_counts=True)
+    for idx, cnt in sorted(zip(uniq.tolist(), cnts.tolist()), key=lambda x: -x[1])[:10]:
+        print(f"    [{idx:>2}] {CANDIDATES[idx].name:<30}  {cnt:>4}  ({cnt/n_c:.1%})")
 
 
 def oracle_selector_decomposition(
@@ -266,6 +332,23 @@ def analyze():
     best_k = max(topk_preds, key=lambda k: r_hit(topk_preds[k], labels))
     print(f"\n  → 최적 k: {best_k}")
 
+    # ── 2b. Prediction temperature 비교 ───────────────────────────
+    print("\n" + "=" * 55)
+    print(f"2b. PREDICTION TEMPERATURE  (Top-{best_k} OOF)")
+    print("=" * 55)
+    best_temp, best_temp_hit = 1.0, 0.0
+    temp_preds = {}
+    for t in [0.3, 0.5, 0.7, 1.0, 1.5, 2.0]:
+        p = get_oof_preds(models, ids, coords, device, topk=best_k, temp=t)
+        h = r_hit(p, labels)
+        temp_preds[t] = p
+        marker = ""
+        if h > best_temp_hit:
+            best_temp_hit, best_temp = h, t
+            marker = "  ← best"
+        print(f"  temp={t:.1f}: {h:.4f}{marker}")
+    print(f"\n  → 최적 temperature: {best_temp}")
+
     # ── 3. Physics blend ──────────────────────────────────────────
     print("\n" + "=" * 55)
     print("3. PHYSICS BLEND  (Top-3 OOF, α=모델 비중)")
@@ -286,6 +369,12 @@ def analyze():
     print("4. SELECTOR ERROR DECOMPOSITION")
     print("=" * 55)
     oracle_selector_decomposition(models, ids, coords, labels, device)
+
+    # ── 4b. C그룹 분석 ───────────────────────────────────────────
+    print("\n" + "=" * 55)
+    print("4b. C그룹 분석  (후보 공간 갭 파악)")
+    print("=" * 55)
+    c_group_analysis(coords, labels)
 
     # ── 5. TTA 효과 ───────────────────────────────────────────────
     print("\n" + "=" * 55)

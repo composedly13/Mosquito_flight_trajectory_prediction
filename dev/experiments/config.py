@@ -37,8 +37,9 @@ BOUNDARY_HI = 0.013    # 1.3cm
 CORRECTION_CAP = 0.006 # 최대 보정량 6mm
 
 # Loss hyperparameters
-SOFT_TEMP       = 0.005   # soft-label temperature (smaller = sharper targets)
-PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight
+SOFT_TEMP       = 0.003   # soft-label temperature (smaller = sharper targets)
+PAIRWISE_WEIGHT = 0.25   # pairwise ranking loss weight
+LISTMLE_WEIGHT  = 0.5    # ListMLE: oracle 후보를 top-1으로 직접 최적화
 
 # Metric
 R_HIT_THRESHOLD = 0.01

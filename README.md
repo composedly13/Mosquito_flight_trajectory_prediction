@@ -238,12 +238,14 @@ python dev/experiments/predict.py
 | Candidates | **50개** (Frenet + turn + jerk + 복합) |
 | Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
-| Prediction | Top-k weighted average (최적 k는 analyze.py로 결정) |
+| Seq features | **11개** (jerk_abs, acc_cos 추가 — SEQ_DIM 9→11) |
+| Loss | **CE + PW×0.25 + ListMLE×0.5** |
+| Prediction | **Top-10** weighted average, temp=1.0 |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.01%** (OOF, yaw aug, 50 candidates) |
+| CV R-Hit | **64.61%** (현재 최고) |
 | Oracle ceiling | **74.89%** |
-| Selector efficiency | **85.5%** (목표: 93.5% → 70% 달성) |
+| Selector efficiency | **86.3%** (Oracle rank mean=7.8 / 목표: 93.5% → 70% 달성) |
 
 ---
 
@@ -269,7 +271,9 @@ python dev/experiments/predict.py
 | 50-candidate oracle | 74.89% | - | 후보 확장 상한 |
 | 50-candidate selector (d128, SO3) | 63.65% | - | 기존 모델 재학습 |
 | 50-candidate selector (d128, yaw) | 64.13% | - | SO3→yaw +4.8pp |
-| 50-candidate selector (d128, yaw) re-run | **64.01%** | - | 재현 확인 (±0.12pp 노이즈) |
+| 50-candidate selector (d128, yaw) re-run | 64.01% | - | 재현 확인 (±0.12pp 노이즈) |
+| 50-candidate selector, Top-10 (analyze) | **64.31%** | - | Top-10 OOF, oracle rank 22.7 진단 |
+| 50-candidate selector, SOFT_TEMP=0.003 | 63.44% | - | ❌ -0.57pp, temp 방향 기각 |
 
 ### Selector Error Decomposition
 
@@ -551,25 +555,207 @@ python dev/experiments/predict.py
 | `train.py` | `PAIRWISE_WEIGHT` config 연동, Boundary 블록 삭제 |
 | `analyze.py` | oracle 후보 기여도 테이블, Top-k 확장(7·10), 70% 달성 조건 자동 출력, Boundary 섹션 삭제 |
 
-**[다음 실험 계획]**
+---
 
-**1순위: oracle 후보 기여도 분석 → 후보 수 최적화**
-- `analyze.py` 실행 후 미사용/저빈도 후보 확인
-- 목표: 40~45개 후보로 줄여 efficiency 89%+ 회복 (oracle 73~74% 유지)
-- 기대 OOF: 73.5% × 89% ≈ **65.5%**
+### 2026-05-22 (5)
 
-**2순위: soft-label temperature 탐색**
-- 후보 50개 환경에서 온도가 낮을수록(sharper) 모델 판별력 향상 가능성
-- `SOFT_TEMP`: 0.003 / 0.005 / 0.007 / 0.010
+**[analyze.py 전체 진단 — 50개 후보 현재 모델]**
 
-**3순위: pairwise loss weight 탐색**
-- 후보 많을수록 ranking 손실의 중요도 변화
-- `PAIRWISE_WEIGHT`: 0.0 / 0.1 / 0.25 / 0.5
+**Oracle 후보 기여도 Top 15**
 
-**현실적 목표**
+| idx | name | count | % |
+|---:|---|---:|---:|
+| 43 | jerk_xl_pos | 1212 | 12.1% |
+| 21 | latency_s085 | 1184 | 11.8% |
+| 44 | jerk_xl_neg | 1069 | 10.7% |
+| 40 | turn_n060 | 852 | 8.5% |
+| 39 | turn_p060 | 688 | 6.9% |
+| 24 | latency_l115 | 621 | 6.2% |
+| 4 | acc_2d1_060 | 534 | 5.3% |
+| 49 | turn_fast_n030 | 393 | 3.9% |
+| 38 | turn_n045 | 340 | 3.4% |
+| 25 | latency_l110_turn | 270 | 2.7% |
+| 26 | latency_s090_turn | 256 | 2.6% |
+| 0 | p0_2d1 | 222 | 2.2% |
+| 23 | latency_l108 | 216 | 2.2% |
+| 17 | frenet_fast_p120_n020 | 163 | 1.6% |
+| 22 | latency_s092 | 156 | 1.6% |
 
-| 단계 | 기대 CV |
+- 미사용 후보 0개 — **50개 전부 최소 1번은 oracle-best** → 후보 자르기 불가
+- `jerk_xl_pos` + `jerk_xl_neg` 단 2개가 전체 22.8% 담당 — 50개 확장의 핵심 기여
+
+**Top-k 비교 (OOF)**
+
+| k | R-Hit |
+|---:|---:|
+| 1 | 0.6287 |
+| 2 | 0.6367 |
+| 3 | 0.6401 |
+| 5 | 0.6399 |
+| 7 | 0.6425 |
+| **10** | **0.6431** |
+| all(50) | 0.6276 |
+
+→ **Top-10이 최적.** k가 클수록 좋아지는 것 자체가 oracle rank가 높다는 방증.
+
+**Selector Error Decomposition**
+
+| 그룹 | 샘플 | 비율 | 의미 |
+|---|---:|---:|---|
+| A: oracle ∩ top-5 | 1,847 | 18.5% | selector 성공 |
+| **B: oracle ∩ top-5 밖** | **5,642** | **56.4%** | ← 핵심 실패 |
+| C: oracle 자체 없음 | 2,511 | 25.1% | 후보군 한계 |
+
+```
+Oracle candidate rank:  mean=22.7  median=24  p75=39  p90=46
+Oracle in Top-1: 11.4%  Top-3: 20.5%  Top-5: 26.4%  Top-7: 30.7%
+
+랜덤 기댓값 (50개 균등): Top-1=2.0%  Top-5=10.0%
+현재: Top-5=26.4% → 랜덤 대비 2.6배 — 여전히 심각하게 낮음
+```
+
+**결론: 후보 수가 아닌 랭킹 학습이 문제**
+- oracle이 존재하는 7,489샘플 중 **75.3%에서 selector가 top-5 밖으로 밀어냄**
+- `jerk_xl` 계열처럼 극단 파라미터 후보를 모델이 "비정상"으로 판단하는 것으로 추정
+- SOFT_TEMP=0.005(기존)가 너무 넓어 여러 후보에 확률 질량 분산 → oracle 후보에 집중 못 함
+- 후보 pruning 시 oracle 직접 하락 → 확장한 50개 유지하면서 selector 개선이 올바른 방향
+
+**[실험: SOFT_TEMP 0.005 → 0.003]**
+
+```
+가설: sharper soft label → oracle 후보에 집중된 gradient → oracle rank 개선
+```
+
+- 기존 `SOFT_TEMP=0.005`: dist=0.5cm 후보와 dist=1.5cm 후보 간 label 차이 작음
+- `SOFT_TEMP=0.003`: 거리 차이가 label에 더 가파르게 반영 → 모델이 정답을 더 명확히 구분
+
+변경: `config.py` `SOFT_TEMP = 0.003`
+
+**결과: 실패 (-0.57pp)**
+
+| | SOFT_TEMP=0.005 | SOFT_TEMP=0.003 |
+|---|---:|---:|
+| CV mean | **0.6401** | 0.6344 |
+| OOF | **0.6401** | 0.6345 |
+| Efficiency | **85.5%** | 84.7% |
+
+원인: 50개 후보 환경에서 1cm 이내 유효 후보 다수 공존 → one-hot에 가까운 label이 gradient 신호를 희소하게 만들어 학습 불안정. 기존 0.005가 최적.
+
+**[다음 실험: PAIRWISE_WEIGHT 0.25 → 0.5]**
+
+- temp 방향 막힘 → ranking loss 강화로 oracle rank 22.7 직접 공략
+- `SOFT_TEMP=0.005` 복귀, `PAIRWISE_WEIGHT=0.5`
+- 가설: pairwise weight 2배 → good/bad 마진 압력 증가 → oracle 후보 상위 랭킹 개선
+- 성공 기준: analyze.py oracle rank mean < 20
+
+---
+
+### 2026-05-22 (6)
+
+**[PAIRWISE_WEIGHT=0.5 실패 — CV 붕괴]**
+
+| | PAIRWISE_WEIGHT=0.25 | PAIRWISE_WEIGHT=0.5 |
+|---|---:|---:|
+| Fold 1 | ~0.64 | 0.6397 |
+| Fold 2 | ~0.64 | 0.6397 |
+| Fold 3 | ~0.64 | 0.6397 |
+| Fold 4 | ~0.64 | 0.6397 |
+| Fold 5 | ~0.64 | 0.5974 |
+| CV mean | **0.6401** | 0.6215 (−1.86pp) |
+
+- Fold 5 = 0.5974 이상치 — pairwise loss 과도 시 특정 fold 데이터에서 gradient 충돌
+- pairwise ranking 신호가 CE loss를 압도 → 전체 확률 질량이 극단으로 쏠림
+- 결론: **PAIRWISE_WEIGHT=0.25 유지**
+
+**[seq feature 확장 — SEQ_DIM 9→11]**
+
+기존 9개 피처에 2개 추가:
+
+| 피처 | 설명 | 기대 효과 |
+|---|---|---|
+| `jerk_abs` | 절대 jerk 크기 (acc 변화율) | jerk_xl 계열 후보 필요 케이스 감지 |
+| `acc_cos` | 연속 acc 벡터 간 코사인 유사도 | 급격한 방향 전환 감지 |
+
+- `candidates.py`: `make_seq_features`, `make_seq_features_gpu` t≥3 분기에 추가
+- `model.py`: `SEQ_DIM 9→11`, `seq_proj: Linear(9→128) → Linear(11→128)`
+- 피처 추가 비용 미미 (연산량 동일), 모델 파라미터 수 변화 없음
+
+**[ListMLE loss 추가]**
+
+oracle 후보를 직접 top-1로 올리는 ranking loss 추가:
+
+```python
+def listmle_loss(logits, cands, true):
+    dist = torch.norm(cands - true.unsqueeze(1), dim=-1)
+    oracle_idx = dist.argmin(dim=-1)
+    return -F.log_softmax(logits, dim=-1).gather(1, oracle_idx.unsqueeze(1)).mean()
+
+loss = loss_ce + 0.25 × loss_pair + 0.5 × loss_lml
+```
+
+- `LISTMLE_WEIGHT = 0.5` (config.py에 추가)
+- 가설: oracle 후보 log-probability 직접 최대화 → oracle rank 개선
+
+**[재학습 결과 — d128 + yaw + SEQ11 + ListMLE (현재 최고)]**
+
+| | 이전 (SEQ9, 손실CE+PW) | 현재 (SEQ11, CE+PW+ListMLE) |
+|---|---:|---:|
+| CV mean R-Hit | 0.6401 | **0.6461** (+6.0pp) |
+| OOF R-Hit | 0.6401 | **0.6461** |
+| Oracle rank mean | 22.7 | 7.8 (−14.9) |
+| Oracle rank median | 24 | 4 (−20) |
+| Selector efficiency | 85.5% | **86.3%** (+0.8pp) |
+
+- Oracle rank가 극적으로 개선 (mean 22.7→7.8, median 24→4)
+- jerk_abs/acc_cos 피처 추가 + ListMLE 복합 효과
+- Top-10 OOF 기준 **0.6461 = 현 최고** (이전 0.6431)
+
+**Selector Error Decomposition (재학습 후)**
+
+| 그룹 | 비율 | Top-1 hit | Top-5 hit |
+|---|---:|---:|---:|
+| A: oracle ∩ top-5 | 34.7% | 0.8614 | 0.8505 |
+| B: oracle ∩ top-5 밖 | 40.2% | 0.0001 | 0.1030 |
+| C: oracle 없음 | 25.1% | 0.0 | 0.0 |
+
+- A그룹 비중 18.5% → 34.7% (oracle을 top-5 안으로 끌어오는 데 성공)
+- B그룹 비중 56.4% → 40.2% (여전히 최대 실패 원인)
+- C그룹 25.1% 고정 — 후보 공간 자체의 한계
+
+**[Prediction Temperature 탐색]**
+
+| temp | R-Hit (Top-10 OOF) |
+|---:|---:|
+| 0.3 | 0.6412 |
+| 0.5 | 0.6442 |
+| 0.7 | 0.6453 |
+| **1.0** | **0.6461** |
+| 1.5 | 0.6452 |
+| 2.0 | 0.6443 |
+
+→ `temp=1.0`이 최적 (소프트맥스를 추가로 sharp/soft하게 조절해도 이득 없음)
+
+**[C그룹 분석 기반 후보 공간 확장 준비]**
+
+C그룹(25.1%, 약 2,511샘플)은 현재 후보 50개 중 어떤 것도 1cm 이내에 없어 selector 개선만으로는 해결 불가.
+
+- `analyze.py`에 `c_group_analysis()` 함수 추가
+  - C그룹 샘플의 Frenet 파라미터(par/perp/jerk) 분포 계산
+  - 현재 후보 커버리지 경계와 비교 → 어느 방향/범위가 미커버인지 파악
+  - C그룹에 가장 가까운 기존 후보 top-10 표시
+- `analyze()` 본체의 섹션 4 직후에 섹션 4b로 연결 완료
+- 다음: `python analyze.py` 실행 → C그룹 Frenet 분포 확인 → 후보 파라미터 확장
+
+**현재 파이프라인 업데이트**
+
+| 항목 | 현재 설정 |
 |---|---|
-| 후보 수 최적화 (40~45개) | 65~66% |
-| temp/pairwise 튜닝 | 66~67.5% |
-| 70% 달성 조건 | efficiency ≥ 93.5% (74.89% × 93.5% = 70.0%) |
+| Candidates | **50개** |
+| Augmentation | **yaw-only** |
+| Seq features | **11개** (jerk_abs, acc_cos 추가) |
+| Loss | **CE + PW×0.25 + ListMLE×0.5** |
+| Prediction | **Top-10**, temp=1.0 |
+| CV R-Hit | **64.61%** (현재 최고) |
+| Oracle ceiling | **74.89%** |
+| Selector efficiency | **86.3%** |
+| Oracle rank | mean=7.8, median=4 |

@@ -186,13 +186,18 @@ def make_seq_features(x: np.ndarray) -> np.ndarray:
             curvature = np.zeros((N, 1), dtype=np.float32)
 
         if t >= 3:
-            d3 = x[:, t - 2] - x[:, t - 3]
-            prev_acc = d2 - d3
-            jerk_norm = np.linalg.norm(acc - prev_acc, axis=1, keepdims=True) / (speed + EPS)
+            d3             = x[:, t - 2] - x[:, t - 3]
+            prev_acc       = d2 - d3
+            jerk_norm      = np.linalg.norm(acc - prev_acc, axis=1, keepdims=True) / (speed + EPS)
             direction_flag = np.sign(acc_par)
+            jerk_abs       = np.linalg.norm(acc - prev_acc, axis=1, keepdims=True) / 0.05
+            prev_acc_norm  = np.linalg.norm(prev_acc, axis=1, keepdims=True) + EPS
+            acc_cos        = np.sum(acc * prev_acc, axis=1, keepdims=True) / (acc_norm * prev_acc_norm + EPS)
         else:
-            jerk_norm = np.zeros((N, 1), dtype=np.float32)
+            jerk_norm      = np.zeros((N, 1), dtype=np.float32)
             direction_flag = np.zeros((N, 1), dtype=np.float32)
+            jerk_abs       = np.zeros((N, 1), dtype=np.float32)
+            acc_cos        = np.zeros((N, 1), dtype=np.float32)
 
         step_feat = np.concatenate([
             speed / 0.05,                    # normalized speed
@@ -204,12 +209,14 @@ def make_seq_features(x: np.ndarray) -> np.ndarray:
             turn_cos,
             curvature * 10,
             direction_flag,
-        ], axis=1)  # (N, 9)
+            jerk_abs,                        # absolute jerk size (jerk_xl 감지)
+            acc_cos,                         # acc direction consistency (급격한 변화 감지)
+        ], axis=1)  # (N, 11)
         feats.append(step_feat)
 
     # pad first step (t=0) with zeros
-    feats = [np.zeros((N, 9), dtype=np.float32)] + feats  # 11 steps
-    return np.stack(feats, axis=1).astype(np.float32)      # (N, 11, 9)
+    feats = [np.zeros((N, 11), dtype=np.float32)] + feats  # 11 steps
+    return np.stack(feats, axis=1).astype(np.float32)      # (N, 11, 11)
 
 
 def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
@@ -296,9 +303,9 @@ def make_candidates_gpu(x: torch.Tensor) -> torch.Tensor:
 
 
 def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
-    """x: (B, 11, 3) → (B, 11, 9)"""
+    """x: (B, 11, 3) → (B, 11, 11)"""
     B, dev, dt = x.shape[0], x.device, x.dtype
-    feats = [torch.zeros(B, 9, device=dev, dtype=dt)]  # t=0 padding
+    feats = [torch.zeros(B, 11, device=dev, dtype=dt)]  # t=0 padding
 
     for t in range(1, 11):
         d1    = x[:, t] - x[:, t - 1]
@@ -329,9 +336,14 @@ def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
             prev_acc       = d2 - d3
             jerk_norm      = (acc - prev_acc).norm(dim=-1, keepdim=True) / (speed + EPS)
             direction_flag = torch.sign(acc_par_s)
+            jerk_abs       = (acc - prev_acc).norm(dim=-1, keepdim=True) / 0.05
+            prev_acc_norm  = prev_acc.norm(dim=-1, keepdim=True).clamp(min=EPS)
+            acc_cos        = (acc * prev_acc).sum(-1, keepdim=True) / (acc_norm * prev_acc_norm + EPS)
         else:
             jerk_norm      = torch.zeros(B, 1, device=dev, dtype=dt)
             direction_flag = torch.zeros(B, 1, device=dev, dtype=dt)
+            jerk_abs       = torch.zeros(B, 1, device=dev, dtype=dt)
+            acc_cos        = torch.zeros(B, 1, device=dev, dtype=dt)
 
         feats.append(torch.cat([
             speed / 0.05,
@@ -343,9 +355,11 @@ def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
             turn_cos,
             curvature * 10,
             direction_flag,
-        ], dim=-1))  # (B, 9)
+            jerk_abs,       # absolute jerk size (jerk_xl 감지)
+            acc_cos,        # acc direction consistency (급격한 변화 감지)
+        ], dim=-1))  # (B, 11)
 
-    return torch.stack(feats, dim=1)  # (B, 11, 9)
+    return torch.stack(feats, dim=1)  # (B, 11, 11)
 
 
 def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:

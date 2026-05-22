@@ -30,6 +30,13 @@ def pairwise_loss(logits: torch.Tensor, soft: torch.Tensor, margin: float = 0.12
     return F.relu(margin - score_good + score_bad).mean()
 
 
+def listmle_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
+    """Oracle 후보를 top-1으로 직접 최적화: -log P(oracle ranked first)."""
+    dist       = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
+    oracle_idx = dist.argmin(dim=-1)                             # (B,)
+    return -F.log_softmax(logits, dim=-1).gather(1, oracle_idx.unsqueeze(1)).mean()
+
+
 def train_fold(
     fold: int,
     ids: list,
@@ -75,7 +82,8 @@ def train_fold(
 
             loss_ce   = -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
             loss_pair = pairwise_loss(logits, soft)
-            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
+            loss_lml  = listmle_loss(logits, cands, true)
+            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair + LISTMLE_WEIGHT * loss_lml
 
             optimizer.zero_grad()
             loss.backward()
@@ -96,7 +104,7 @@ def train_fold(
                 cand_f = make_cand_features_gpu(coords_b, cands)
 
                 logits = model(seq_f, cand_f)
-                pred   = selector_predict(logits, cands)
+                pred   = selector_predict(logits, cands, topk =10)
                 preds.append(pred.cpu().numpy())
                 trues.append(batch["label"].cpu().numpy())
 

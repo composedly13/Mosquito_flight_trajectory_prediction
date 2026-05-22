@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP
 
-SEQ_DIM  = 9
+SEQ_DIM  = 11
 CAND_DIM = 10
 
 
@@ -103,9 +103,10 @@ def selector_predict(
     logits: torch.Tensor,   # (B, C)
     cands:  torch.Tensor,   # (B, C, 3)
     topk: int = 3,
+    temp: float = 1.0,
 ) -> torch.Tensor:          # (B, 3)
     """Weighted sum of top-k candidates."""
-    weights = F.softmax(logits, dim=-1)             # (B, C)
+    weights = F.softmax(logits / temp, dim=-1)      # (B, C)
     topk_w, topk_idx = weights.topk(topk, dim=-1)  # (B, k)
     topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
     topk_cands = cands.gather(
