@@ -252,17 +252,17 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **Smart 50개** (C그룹 분석 기반 10개 교체 — 극단 turn/jerk/latency 강화) |
+| Candidates | **원래 50개** (original 50-cand — 실험 B 확정 config, Smart50 실험 후 Phase 6 복원) |
 | Augmentation | **yaw-only** (speed-scale 0.85~1.15 실험 결과 효과 없음 → 복귀) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
-| Loss | **CE + PW×0.25 + LML×0.10** (Smart 50-cand G2 실험 설정) |
-| Prediction | **Top-10** weighted average, temp=2.0 (G2 최적) |
+| Loss | **CE + PW×0.25 + LML×0.05** (실험 B 최적 config) |
+| Prediction | **Top-10** weighted average, temp=1.0 |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.75%** (Smart 50, LML=0.10 — G2) / 단일 seed best: 64.89% (LML=0.05) |
-| Oracle ceiling | **77.02%** (Smart 50-cand 기준) |
-| Selector efficiency | **84.1%** (G2 기준, 목표: eff ≥ 87.6% → OOF≥0.677 → LB≈0.702) |
+| CV R-Hit | **64.84%** (seed42, original 50-cand + LML=0.05) |
+| Oracle ceiling | **74.89%** (original 50-cand 기준) |
+| Selector efficiency | **86.6%** (목표: eff ≥ 93.5% → OOF≥0.677 → LB≈0.702) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---

@@ -20,26 +20,21 @@ class CandidateSpec:
     time_scale: float = 1.0  # latency correction
 
 
-# Smart 50-cand (2026-05-22): 10개 제거 + 10개 교체, 총 50개 유지
-#
-# 제거: acc_2d1_040/050 (weak acc), jerk_small±0.08 (xl/l로 커버됨),
-#       frenet_par090/100_p000 + par085/095_n005 (frenet_best 중복 4개),
-#       latency_s088/l112 (s085~s092, l108~l115 사이 보간 중복)
-#
-# 추가: latency_s075/s080/l120 (C-group nearest 21.8% = latency_s085 → 더 강한 보정),
-#       turn_p070/n070/p080/n080 (C-group |perp|>0.60 15.5%, |perp| p95=1.02),
-#       jerk_xxl±0.80 (C-group jerk p75=0.55, p95=1.70),
-#       frenet_par130_n020 (C-group par>1.20 20.4%)
+# 원본 28개 + 추가 후보 (더 촘촘한 Frenet 커버리지)
 CANDIDATES = [
     # Base
     CandidateSpec("p0_2d1",            2.00,  0.00,  0.00),
 
-    # Acceleration family (강한 것만 유지)
+    # Acceleration family
+    CandidateSpec("acc_2d1_040",       2.00,  0.40,  0.40),
+    CandidateSpec("acc_2d1_050",       2.00,  0.50,  0.50),
     CandidateSpec("acc_2d1_056",       1.98,  0.56,  0.56),
     CandidateSpec("acc_2d1_060",       2.00,  0.60,  0.60),
 
-    # Frenet family (핵심 — 중복 4개 제거)
+    # Frenet family (핵심)
     CandidateSpec("frenet_best",       1.98,  0.96, -0.08),
+    CandidateSpec("frenet_par090_p000",1.98,  0.90,  0.00),
+    CandidateSpec("frenet_par100_p000",1.98,  1.00,  0.00),
     CandidateSpec("frenet_par100_n010",2.00,  1.00, -0.10),
     CandidateSpec("frenet_par090_p020",1.96,  0.90,  0.20),
     CandidateSpec("frenet_par080_p020",2.02,  0.80,  0.20),
@@ -53,44 +48,42 @@ CANDIDATES = [
     CandidateSpec("frenet_par120_p020",1.98,  1.20,  0.20),
     CandidateSpec("frenet_fast_p120_n020", 2.08, 1.20, -0.20),
     CandidateSpec("frenet_slow_p070_p020", 1.86, 0.70,  0.20),
-    CandidateSpec("frenet_par130_n020",1.92,  1.30, -0.20),  # ★NEW: C-group par>1.20 20.4%
 
-    # Jerk family (small 제거, xxl 추가)
-    CandidateSpec("jerk_med_pos",      1.98,  0.90, -0.05, jerk= 0.15),
-    CandidateSpec("jerk_med_neg",      1.98,  0.90, -0.05, jerk=-0.15),
-    CandidateSpec("jerk_l_pos",        1.98,  0.88,  0.00, jerk= 0.30),
-    CandidateSpec("jerk_l_neg",        1.98,  0.88,  0.00, jerk=-0.30),
-    CandidateSpec("jerk_xl_pos",       1.96,  0.82,  0.00, jerk= 0.50),
-    CandidateSpec("jerk_xl_neg",       1.96,  0.82,  0.00, jerk=-0.50),
-    CandidateSpec("jerk_xxl_pos",      1.94,  0.76,  0.00, jerk= 0.80),  # ★NEW: C-group jerk
-    CandidateSpec("jerk_xxl_neg",      1.94,  0.76,  0.00, jerk=-0.80),  # ★NEW
+    # Jerk family
+    CandidateSpec("jerk_small_pos",    1.98,  0.80, -0.05, jerk= 0.08),
+    CandidateSpec("jerk_small_neg",    1.98,  0.80, -0.05, jerk=-0.08),
 
-    # Latency family (s088/l112 제거, s075/s080/l120 추가)
-    CandidateSpec("latency_s075",      1.98,  0.96, -0.08, time_scale=0.75),  # ★NEW
-    CandidateSpec("latency_s080",      1.98,  0.96, -0.08, time_scale=0.80),  # ★NEW: C-group 21.8%
+    # Latency family
     CandidateSpec("latency_s085",      1.98,  0.96, -0.08, time_scale=0.85),
     CandidateSpec("latency_s092",      1.98,  0.96, -0.08, time_scale=0.92),
     CandidateSpec("latency_l108",      1.98,  0.96, -0.08, time_scale=1.08),
     CandidateSpec("latency_l115",      1.98,  0.96, -0.08, time_scale=1.15),
-    CandidateSpec("latency_l120",      1.98,  0.96, -0.08, time_scale=1.20),  # ★NEW
     CandidateSpec("latency_l110_turn", 1.98,  1.10, -0.20, time_scale=1.10),
     CandidateSpec("latency_s090_turn", 1.96,  0.90,  0.20, time_scale=0.90),
 
-    # 추가 Frenet
+    # 추가: 더 촘촘한 커버리지
+    CandidateSpec("frenet_par085_n005",1.98,  0.85, -0.05),
+    CandidateSpec("frenet_par095_n005",1.98,  0.95, -0.05),
     CandidateSpec("frenet_par105_n010",2.00,  1.05, -0.10),
     CandidateSpec("frenet_par075_p010",1.98,  0.75,  0.10),
+    CandidateSpec("jerk_med_pos",      1.98,  0.90, -0.05, jerk= 0.15),
+    CandidateSpec("jerk_med_neg",      1.98,  0.90, -0.05, jerk=-0.15),
+    CandidateSpec("latency_s088",      1.98,  0.96, -0.08, time_scale=0.88),
+    CandidateSpec("latency_l112",      1.98,  0.96, -0.08, time_scale=1.12),
 
-    # 급격한 방향 전환 (p070/n070/p080/n080 추가, p030/n030 유지)
+    # 급격한 방향 전환 커버리지 확장 (oracle miss 케이스 대응)
     CandidateSpec("turn_p030",         2.00,  0.80,  0.30),
     CandidateSpec("turn_n030",         2.00,  0.80, -0.30),
     CandidateSpec("turn_p045",         1.96,  0.70,  0.45),
     CandidateSpec("turn_n045",         1.96,  0.70, -0.45),
     CandidateSpec("turn_p060",         1.90,  0.55,  0.60),
     CandidateSpec("turn_n060",         1.90,  0.55, -0.60),
-    CandidateSpec("turn_p070",         1.84,  0.45,  0.70),  # ★NEW: C-group |perp|>0.60 15.5%
-    CandidateSpec("turn_n070",         1.84,  0.45, -0.70),  # ★NEW
-    CandidateSpec("turn_p080",         1.78,  0.38,  0.80),  # ★NEW: C-group |perp| p95=1.02
-    CandidateSpec("turn_n080",         1.78,  0.38, -0.80),  # ★NEW
+
+    # 강한 Jerk 커버리지
+    CandidateSpec("jerk_l_pos",        1.98,  0.88,  0.00, jerk= 0.30),
+    CandidateSpec("jerk_l_neg",        1.98,  0.88,  0.00, jerk=-0.30),
+    CandidateSpec("jerk_xl_pos",       1.96,  0.82,  0.00, jerk= 0.50),
+    CandidateSpec("jerk_xl_neg",       1.96,  0.82,  0.00, jerk=-0.50),
 
     # Turn + Jerk 복합
     CandidateSpec("tj_pp20",           1.98,  0.85,  0.20, jerk= 0.20),
@@ -100,9 +93,9 @@ CANDIDATES = [
     CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
 
 ]
-# 60-cand 실험(2026-05-22): jerk_xxl~turn_n100 10개 *추가* → oracle +3.4pp, efficiency -4.9pp → 실패
-# Smart 50-cand: 10개 *교체* (총 수 50 유지) + 더 극단 후보(jerk>0.80, perp>0.80) 미포함
-# 성공 기준: oracle ≥ 76%, efficiency ≥ 86%, OOF ≥ 0.652
+# 60-cand 실험(2026-05-22)에서 jerk_xxl~turn_n100 10개 추가했으나
+# oracle +3.4pp vs efficiency -4.9pp → OOF 63.75% (50-cand 64.61% 대비 후퇴)
+# clean baseline은 50개 유지. 추후 ranking 개선 후 재시도.
 
 N_CANDIDATES = len(CANDIDATES)
 
@@ -167,8 +160,7 @@ def make_seq_features(x: np.ndarray) -> np.ndarray:
     """
     Sequence features for each of 11 time steps.
     x: (N, 11, 3)
-    returns: (N, 11, 11)  — 11 features: speed, prev_speed_ratio, acc_norm, acc_par, acc_perp,
-                            jerk_norm, turn_cos, curvature, direction_flag, jerk_abs, acc_cos
+    returns: (N, 11, 9)
     """
     N = x.shape[0]
     feats = []
