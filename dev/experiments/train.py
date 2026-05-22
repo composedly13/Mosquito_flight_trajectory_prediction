@@ -7,7 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP
 from dataset import load_all, MosquitoDataset, augment_batch_gpu, augment_batch_gpu_yaw
 from model import CandidateSelector, soft_labels, selector_predict
 from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
@@ -82,8 +82,9 @@ def train_fold(
 
             loss_ce   = -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
             loss_pair = pairwise_loss(logits, soft)
-            loss_lml  = listmle_loss(logits, cands, true)
-            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair + LISTMLE_WEIGHT * loss_lml
+            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
+            if LISTMLE_WEIGHT > 0:
+                loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
 
             optimizer.zero_grad()
             loss.backward()
@@ -104,7 +105,7 @@ def train_fold(
                 cand_f = make_cand_features_gpu(coords_b, cands)
 
                 logits = model(seq_f, cand_f)
-                pred   = selector_predict(logits, cands, topk =10)
+                pred   = selector_predict(logits, cands, topk=TOPK)
                 preds.append(pred.cpu().numpy())
                 trues.append(batch["label"].cpu().numpy())
 

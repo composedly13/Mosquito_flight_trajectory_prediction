@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from config import (
     TEST_DIR, SUBMISSION_PATH, OUTPUT_DIR,
-    SEED, N_FOLDS, BATCH_SIZE,
+    SEED, N_FOLDS, BATCH_SIZE, TOPK,
 )
 from dataset import load_all
 from model import CandidateSelector, selector_predict
@@ -48,7 +48,7 @@ def predict_batch(
 ) -> np.ndarray:               # (B, 3)
     with torch.no_grad():
         avg_logits = sum(m(seq_feat, cand_feat) for m in selectors) / len(selectors)
-        pred = selector_predict(avg_logits, cands)
+        pred = selector_predict(avg_logits, cands, topk=TOPK)
     return pred.cpu().numpy()
 
 

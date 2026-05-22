@@ -89,81 +89,80 @@ MISS 케이스는 급격한 방향 전환이 원인 — 속도(+20%), 가속도(
 입력: 11 시점 3D 좌표 (N, 11, 3)
         │
         ├── [Candidate Generation]
-        │     Frenet 프레임 기반 35개 후보 생성 → (N, 35, 3)
+        │     Frenet 프레임 기반 50개 후보 생성 → (N, 50, 3)
         │
         ├── [Feature Extraction]
-        │     seq_feat:  (N, 11, 9)  — 속도/가속도/곡률/jerk 등
-        │     cand_feat: (N, 35, 10) — 후보별 Frenet 투영 피처
+        │     seq_feat:  (N, 11, 11) — 속도/가속도/곡률/jerk/jerk_abs/acc_cos
+        │     cand_feat: (N, 50, 10) — 후보별 Frenet 투영 피처
         │
-        ├── [CandidateSelector — Transformer]
-        │     TransformerEncoder (seq_feat)        → 시퀀스 컨텍스트
-        │     Cross-Attention (candidates ← seq)  → 후보별 score
-        │     → logits (N, 35)
-        │     → Top-3 가중 평균 예측
-        │
-        └── [BoundaryMLP]
-              오차 0.5~2.5cm 구간에 대해 잔차 보정 (최대 6mm)
-              → 최종 예측 (N, 3)
+        └── [CandidateSelector — Transformer]
+              TransformerEncoder (seq_feat)        → 시퀀스 컨텍스트
+              Cross-Attention (candidates ← seq)  → 후보별 score
+              → logits (N, 50)
+              → Top-10 가중 평균 예측 → 최종 예측 (N, 3)
 ```
 
 ### CandidateSelector 상세
 
 | 컴포넌트 | 구성 |
 |---|---|
-| seq_proj | Linear(9 → 128) |
+| seq_proj | Linear(11 → 128) |
 | PositionalEncoding | Embedding(11, 128) |
 | TransformerEncoder | d_model=128, nhead=4, layers=3, norm_first=True |
 | cand_proj | Linear(10 → 128) |
 | cross_attn | MultiheadAttention(candidates → sequence) |
-| head | Linear(128×2+10 → 128) → GELU → Linear(128 → 35) |
+| head | Linear(128×2+10 → 128) → GELU → Linear(128 → 1) per candidate |
 
 ### 손실 함수
 
 ```
-L = L_softCE + 0.25 × L_pairwise
+L = L_softCE + 0.25 × L_pairwise + 0.05 × L_listMLE
 
 L_softCE   : soft label cross-entropy (거리 기반 타겟 분포, temp=0.005)
 L_pairwise : good candidate > bad candidate 랭킹 손실 (margin=0.12)
+L_listMLE  : -log P(oracle ranked #1) — oracle 후보 직접 최적화
 ```
 
 ### 후보 생성 (Candidates)
 
-Frenet 프레임으로 가속도를 분해하여 35개 물리적으로 타당한 후보 생성:
+Frenet 프레임으로 가속도와 jerk를 분해하여 50개 물리적으로 타당한 후보 생성:
 
 ```
-pred = p0 + d1 × t × v + par × t² × acc_par + perp × t² × acc_perp + jerk × t² × jerk
+pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk_vec
 ```
 
 | 계열 | 수 | 설명 |
 |---|---|---|
 | Base | 1 | 순수 선형 외삽 |
 | Acceleration | 4 | 가속도 보정 |
-| Frenet | 6 | 접선/법선 방향 분리 |
-| Turn | 8 | 방향 전환 케이스 |
-| Jerk | 4 | 순간 가속도 변화 |
-| Latency | 12 | 시스템 지연 보정 (0.85~1.15×) |
+| Frenet | 11 | 접선/법선 방향 세밀 분해 |
+| Turn | 13 | 방향 전환 (|perp| 0.20~0.60) + 복합 |
+| Jerk | 6 | 순간 가속도 변화 (|jerk| 0.08~0.50) |
+| Latency | 15 | 시스템 지연 보정 (0.85~1.15×) + turn 복합 |
 
 ### 학습 전략
 
 | 항목 | 설정 |
 |---|---|
 | K-Fold | 5-Fold (MD5 해시 기반 안정적 분할) |
-| 데이터 증강 | SO3 랜덤 3D 회전 — 배치 단위로 GPU에서 수행 |
+| 데이터 증강 | **yaw-only** (z축 회전, z=UP 좌표계 보존) — 배치 단위 GPU 수행 |
 | 옵티마이저 | AdamW (lr=3e-4, weight_decay=1e-4) |
-| 스케줄러 | CosineAnnealingLR |
-| Early Stopping | patience=30 |
-| Boundary MLP | OOF 예측으로만 학습 (데이터 누수 방지) |
+| 스케줄러 | CosineAnnealingLR (T_max=EPOCHS, epoch 단위 step) |
+| Early Stopping | patience=40 |
+| Boundary MLP | **완전 제거** (OOF −7.9pp, 오차 벡터 방향 학습 불가) |
 
 ### 원본(PB 0.6822) 대비 개선점
 
-| 항목 | 원본 | 개선 |
+| 항목 | 원본 | 현재 |
 |---|---|---|
 | 셀렉터 | Attn-GRU | **Transformer + Cross-Attention** |
-| 후보 수 | 28개 | **35개** |
+| 후보 수 | 28개 | **50개** |
+| Seq features | — | **11개** (jerk_abs, acc_cos 추가) |
 | 학습 | 단일 모델 | **5-Fold 앙상블** |
-| 증강 | 없음 | **SO3 3D 회전** |
-| 손실 | CE | **Soft-label CE + Pairwise ranking** |
-| Boundary | 전체 데이터 | **OOF만 사용** |
+| 증강 | 없음 | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
+| 손실 | CE | **Soft-CE + Pairwise + ListMLE** |
+| Top-k 예측 | Top-1 (argmax) | **Top-10 가중 평균** |
+| Boundary | 전체 데이터 적용 | **완전 제거** (−7.9pp 확인) |
 
 ---
 
@@ -220,13 +219,16 @@ $env:KMP_DUPLICATE_LIB_OK = "TRUE"
 ```bash
 # 데이터 준비: data/ 폴더에 대회 데이터 압축 해제
 
-# 학습 (5-Fold + Boundary MLP)
+# 학습 (5-Fold)
 cd D:\Mosquito
 python dev/experiments/train.py
 
 # 추론 및 제출 파일 생성
 python dev/experiments/predict.py
 # → dev/experiments/outputs/submission.csv
+
+# 진단 (OOF 분석 — 학습 후 실행)
+python dev/experiments/analyze.py
 ```
 
 ---
@@ -235,17 +237,17 @@ python dev/experiments/predict.py
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **60개** (Frenet + turn + jerk 확장 — C그룹 대응) |
+| Candidates | **50개** (Frenet + turn + jerk — 60-cand 실험 후 efficiency 역행으로 복귀) |
 | Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
-| Seq features | **11개** (jerk_abs, acc_cos 추가 — SEQ_DIM 9→11) |
-| Loss | **CE + PW×0.25 + ListMLE×0.5** |
-| Prediction | **Top-10** weighted average, temp=1.0 |
+| Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
+| Loss | **CE + PW×0.25 + LML×0.05** (그리드 탐색 A~D 완료, 0.05 최적 확정) |
+| Prediction | **Top-10** weighted average, temp=1.0 (config.TOPK로 통일) |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.61%** (50-cand 기준 / 60-cand 재학습 대기 중) |
-| Oracle ceiling | **74.89%** → 60-cand 재학습 후 78~80% 목표 |
-| Selector efficiency | **86.3%** (Oracle rank mean=7.8 / 목표: 93.5% → 70% 달성) |
+| CV R-Hit | **64.89%** (실험 B, LML=0.05 최적) |
+| Oracle ceiling | **74.89%** (50-cand 기준) |
+| Selector efficiency | **86.3%** (목표: 93.5% → 70% 달성 조건) |
 
 ---
 
@@ -260,32 +262,35 @@ python dev/experiments/predict.py
 
 ## 성능 기록
 
-| 모델 | CV R-Hit | LB R-Hit | 비고 |
-|---|---:|---:|---|
-| Linear extrapolation | 57.88% | - | p₀ + 2v |
-| Acceleration β=0.6 | 60.08% | - | 물리 베이스라인 최고 |
-| PB 참고 솔루션 | - | 68.22% | 공개 솔루션 |
-| 35-candidate oracle | 72.18% | - | 후보군 상한 |
-| 35-candidate selector | 64.28% | - | Top-3, boundary 없음 |
-| 35-candidate + Boundary | 57.06% | - | ❌ 기각 (-7.22pp) |
-| 50-candidate oracle | 74.89% | - | 후보 확장 상한 |
-| 50-candidate selector (d128, SO3) | 63.65% | - | 기존 모델 재학습 |
-| 50-candidate selector (d128, yaw) | 64.13% | - | SO3→yaw +4.8pp |
-| 50-candidate selector (d128, yaw) re-run | 64.01% | - | 재현 확인 (±0.12pp 노이즈) |
-| 50-candidate selector, Top-10 (analyze) | **64.31%** | - | Top-10 OOF, oracle rank 22.7 진단 |
-| 50-candidate selector, SOFT_TEMP=0.003 | 63.44% | - | ❌ -0.57pp, temp 방향 기각 |
+| 모델 | N-cand | CV R-Hit | Oracle | Efficiency | OOF | 비고 |
+|---|---:|---:|---:|---:|---:|---|
+| Linear extrapolation | - | 57.88% | - | - | - | p₀ + 2v |
+| Acceleration β=0.6 | - | 60.08% | - | - | - | 물리 베이스라인 최고 |
+| PB 참고 솔루션 | - | - | - | - | - | LB 68.22% |
+| 35-cand selector (SO3, Top-3) | 35 | 64.28% | 72.18% | 89.1% | 64.28% | 베이스라인 |
+| 35-cand + Boundary | 35 | - | - | - | 57.06% | ❌ -7.22pp |
+| 50-cand (SO3) | 50 | 63.65% | 74.89% | 85.0% | - | |
+| 50-cand (yaw) | 50 | 64.13% | 74.89% | 85.6% | - | SO3→yaw +4.8pp |
+| 50-cand (yaw), SOFT_TEMP=0.003 | 50 | 63.44% | 74.89% | 84.7% | - | ❌ -0.57pp |
+| 50-cand (yaw), PW=0.5 | 50 | 62.15% | 74.89% | - | - | ❌ fold5 붕괴 |
+| 50-cand (yaw), SEQ11+LML=0.5 | 50 | 64.61% | 74.89% | 86.3% | 64.61% | oracle rank 22→7.8 |
+| 60-cand (yaw), SEQ11+LML=0.5 | 60 | 63.75% | **78.31%** | 81.4% | 63.75% | ❌ efficiency 역행 |
+| **실험 A**: 50-cand, LML=0.0 | 50 | **64.66%** | 74.89% | **86.3%** | **64.66%** | clean baseline ★ |
+| 실험 B: LML=0.05 | 50 | **64.89%** | 74.89% | **86.6%** | **64.89%** | oracle rank mean 13.1 |
+| 실험 C: LML=0.10 | 50 | 64.80% | 74.89% | 86.5% | 64.80% | oracle rank mean 10.0 |
+| 실험 D: LML=0.20 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ std↑ fold5↓, 불안정 |
 
 ### Selector Error Decomposition
 
-| 항목 | 35 candidates | 50 candidates |
-|---|---:|---:|
-| Oracle R-Hit | 72.18% | 74.89% |
-| OOF R-Hit (best Top-k) | 64.28% | 재학습 예정 |
-| Selector efficiency | 89.1% | 재학습 예정 |
-| Oracle candidate in Top-1 | 측정 예정 | 측정 예정 |
-| Oracle candidate in Top-3 | 측정 예정 | 측정 예정 |
-| Oracle candidate in Top-5 | 측정 예정 | 측정 예정 |
-| Best Top-k | 3 | 재학습 후 재탐색 |
+| 실험 | Oracle rank mean | Oracle in Top-5 | A그룹 | B그룹 | C그룹 |
+|---|---:|---:|---:|---:|---:|
+| 50-cand, SEQ9, CE+PW | 22.7 | 26.4% | 18.5% | 56.4% | 25.1% |
+| 50-cand, SEQ11, CE+PW+LML=0.5 | **7.8** | — | **34.7%** | 40.2% | 25.1% |
+| 60-cand, SEQ11, CE+PW+LML=0.5 | 12.0 | — | 27.1% | 51.2% | 21.7% |
+| **실험 A**: 50-cand, LML=0.0 | 21.9 | 28.3% | 20.0% | **54.9%** | 25.1% |
+| 실험 B: LML=0.05 | **13.1** | **47.1%** | **33.4%** | 41.5% | 25.1% |
+| 실험 C: LML=0.10 | **10.0** | **51.8%** | **36.0%** | 38.9% | 25.1% |
+| 실험 D: LML=0.20 | — | — | — | — | — | ❌ 불안정 |
 
 ---
 
@@ -797,15 +802,140 @@ C그룹 분석 기반으로 10개 후보 추가:
 - **50 → 60개, oracle ceiling 78~80% 목표** (현재 74.89%)
 - 재학습 후 analyze.py로 C그룹 비율 및 oracle 변화 확인 예정
 
-**현재 파이프라인**
+**60-cand 재학습 결과 및 결론**
 
-| 항목 | 현재 설정 |
+| 항목 | 50-cand (LML=0.5) | 60-cand (LML=0.5) |
+|---|---:|---:|
+| CV R-Hit | 64.61% | 63.75% |
+| Oracle R-Hit | 74.89% | **78.31%** (+3.42pp) |
+| Selector efficiency | 86.3% | 81.4% (−4.9pp) |
+| A그룹 | 34.7% | 27.1% |
+| B그룹 | 40.2% | 51.2% |
+| Oracle rank mean | 7.8 | 12.0 |
+
+결론: oracle ceiling은 올랐으나 efficiency 하락이 상쇄 → OOF −0.86pp. 후보 추가보다 ranking 개선이 우선.
+
+---
+
+### 2026-05-22 (8)
+
+**[코드 정비 — clean baseline 준비]**
+
+| 파일 | 변경 내용 |
 |---|---|
-| Candidates | **60개** (재학습 전) |
-| Augmentation | **yaw-only** |
-| Seq features | **11개** (jerk_abs, acc_cos) |
-| Loss | **CE + PW×0.25 + ListMLE×0.5** |
-| Prediction | **Top-10**, temp=1.0 |
-| CV R-Hit | **64.61%** (50-cand 기준, 재학습 대기 중) |
-| Oracle ceiling | 74.89% → **재학습 후 측정** |
-| Selector efficiency | 86.3% → **재학습 후 측정** |
+| `config.py` | `SOFT_TEMP` 0.003→0.005 복귀, `LISTMLE_WEIGHT` 0.5→0.0, `TOPK=10` 추가 |
+| `candidates.py` | 60→50 복귀 (jerk_xxl~turn_n100 10개 제거) |
+| `train.py` | `topk=10` 하드코딩 → `topk=TOPK`, ListMLE 조건부 실행 |
+| `predict.py` | `selector_predict(topk=TOPK)` 통일 (기존 default topk=3 버그 수정) |
+
+**핵심 발견: SEQ11이 ListMLE보다 기여가 크다**
+- 이전 "SEQ11+LML=0.5 → 0.6461" 실험 당시 SOFT_TEMP=0.003 상태였을 가능성
+- clean baseline (SEQ11, LML=0.0, SOFT_TEMP=0.005) 결과: **OOF 0.6466**
+- LML=0.5 결과(0.6461)를 오히려 소폭 상회 → SEQ11 피처 자체가 핵심 기여
+
+**[실험 A — clean baseline 결과]**
+
+설정: `CANDIDATES=50, SOFT_TEMP=0.005, PAIRWISE_WEIGHT=0.25, LISTMLE_WEIGHT=0.0, TOPK=10, AUG=yaw`
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6540 |
+| 2 | 0.6439 |
+| 3 | 0.6481 |
+| 4 | 0.6490 |
+| 5 | 0.6381 |
+| **CV mean** | **0.6466 ± 0.0053** |
+
+| 지표 | 값 |
+|---|---|
+| OOF R-Hit (Top-10) | **0.6466** |
+| Oracle R-Hit | 0.7489 |
+| Selector efficiency | **86.3%** |
+| Oracle rank mean / median | 21.9 / 22 |
+| Oracle rank p75 / p90 | 39 / 46 |
+| Oracle in Top-1 / Top-3 / Top-5 / Top-7 | 11.1% / 21.2% / 28.3% / 33.1% |
+| A그룹 (oracle ∩ top-5) | 20.0% |
+| B그룹 (oracle ∩ top-5 밖) | **54.9%** ← 핵심 병목 |
+| C그룹 (oracle 없음) | 25.1% |
+
+**B그룹 특이점**: oracle이 top-5 밖에 있어도 Top-1 hit이 **78.6%**. Top-10 가중 평균이 oracle 없이도 1cm 이내 예측을 만들어내는 경우가 많다는 의미 → oracle rank 개선이 OOF로 연결되는 한계 효율이 낮은 구간.
+
+**[다음 실험: ListMLE weight 그리드 탐색]**
+
+| 실험 | LISTMLE_WEIGHT | 목적 |
+|---|---:|---|
+| A (완료) | 0.0 | clean baseline |
+| **B (진행 중)** | **0.05** | 약한 oracle ranking 압력 |
+| C | 0.10 | 중간 |
+| D | 0.20 | 강한 (0.5는 이미 OOF 하락 확인) |
+
+관찰 기준: oracle rank mean < 15 + OOF ≥ 0.6466이면 해당 weight 유효.
+
+**[실험 B — LISTMLE_WEIGHT=0.05 결과]**
+
+| 지표 | 실험 A | 실험 B | 변화 |
+|---|---:|---:|---:|
+| OOF (Top-10) | 0.6466 | **0.6489** | +0.23pp |
+| Selector efficiency | 86.3% | **86.6%** | +0.3pp |
+| Oracle rank mean | 21.9 | **13.1** | −8.8 |
+| Oracle rank median | 22 | **5** | −17 |
+| Oracle in Top-5 | 28.3% | **47.1%** | +18.8pp |
+| A그룹 | 20.0% | **33.4%** | +13.4pp |
+| B그룹 | 54.9% | **41.5%** | −13.4pp |
+
+모든 지표 개선. 특히 oracle rank median 22→5 — ListMLE가 oracle 후보를 상위권으로 효과적으로 끌어올림.
+
+**[실험 C — LISTMLE_WEIGHT=0.10 결과]**
+
+| 지표 | 실험 B | 실험 C | 변화 |
+|---|---:|---:|---:|
+| OOF (Top-10) | **0.6489** | 0.6480 | −0.09pp |
+| Selector efficiency | **86.6%** | 86.5% | −0.1pp |
+| Oracle rank mean | 13.1 | **10.0** | −3.1 |
+| Oracle rank median | 5 | **4** | −1 |
+| Oracle in Top-5 | 47.1% | **51.8%** | +4.7pp |
+| A그룹 | 33.4% | **36.0%** | +2.6pp |
+| B그룹 | **41.5%** | 38.9% | −2.6pp |
+
+Oracle ranking 지표는 계속 개선됐으나 OOF가 0.09pp 소폭 하락. 노이즈 범위(±0.12pp) 이내지만 B→C 추세가 꺾이기 시작.
+
+**[실험 D — LISTMLE_WEIGHT=0.20 결과]**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6614 |
+| 2 | 0.6453 |
+| 3 | 0.6439 |
+| 4 | 0.6500 |
+| 5 | **0.6315** ← 약화 |
+| **CV mean** | **0.6464 ± 0.0097** |
+
+- CV std 0.0053 → **0.0097** (분산 폭증)
+- Fold 5 = 0.6315 — PAIRWISE_WEIGHT=0.5 붕괴(0.5974) 초기 징후와 같은 패턴
+- OOF 0.6465로 B(0.6489) 대비 명확히 열위
+
+**[ListMLE 그리드 탐색 결론]**
+
+| 실험 | LML | OOF | CV std | 평가 |
+|---|---:|---:|---:|---|
+| A | 0.00 | 0.6466 | 0.0053 | clean baseline |
+| **B** | **0.05** | **0.6489** | **0.0053** | **최적 ★** |
+| C | 0.10 | 0.6480 | — | 소폭 하락 |
+| D | 0.20 | 0.6465 | 0.0097 | 불안정 |
+| (참고) | 0.50 | 0.6461\* | — | 이전 실험, SOFT_TEMP=0.003 혼재 |
+
+\* 이전 LML=0.5 실험은 SOFT_TEMP=0.003 상태로 진행됐을 가능성 있어 단순 비교 불가
+
+**결론:** `LISTMLE_WEIGHT=0.05`가 최적. OOF가 높으면서 std가 안정적인 구간. 이상 config 확정 — 이후 실험의 baseline으로 사용.
+
+**[현재 확정 Config]**
+
+```python
+CANDIDATES      = 50
+AUG_MODE        = 'yaw'
+SOFT_TEMP       = 0.005
+PAIRWISE_WEIGHT = 0.25
+LISTMLE_WEIGHT  = 0.05   # ← 확정
+TOPK            = 10
+D_MODEL         = 128
+```
