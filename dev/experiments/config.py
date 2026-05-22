@@ -45,7 +45,7 @@ CORRECTION_CAP = 0.006 # 최대 보정량 6mm
 SOFT_TEMP       = 0.005   # soft-label temperature
 PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight (0.5 시도 → fold5 붕괴, 유지)
 # LISTMLE_WEIGHT grid: 0.0(baseline A) → 0.05(B) → 0.1(C) → 0.2(D)
-LISTMLE_WEIGHT  = 0.05    # 최적값 확정 (A~D 그리드: 0.05가 OOF 최고)
+LISTMLE_WEIGHT  = 0.10    # Smart50-cand: B-group 48%→, 극단 후보 ranking 개선 시도
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일

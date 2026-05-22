@@ -296,7 +296,8 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 D: LML=0.20 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ std↑ fold5↓, 불안정 |
 | 실험 E: yaw+speed-scale 0.85~1.15 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ -0.24pp, 효과 없음 → yaw 복귀 |
 | 실험 F: speed-scale 0.80~1.20 | 50 | — | — | — | — | ❌ E 실패로 건너뜀 |
-| **실험 G**: Smart 50-cand (후보 교체) | 50\* | — | — | — | — | 진행 예정 |
+| 실험 G: Smart 50-cand (후보 교체) | 50★ | 64.73% | **77.02%** | 84.0% | 64.73% | Oracle +2.13pp, B-group↑ 실패 기준 |
+| **실험 G2**: Smart 50 + LML=0.10 | 50★ | — | — | — | — | B-group ranking 개선 시도 |
 
 ### Selector Error Decomposition
 
@@ -310,6 +311,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 C: LML=0.10 | **10.0** | **51.8%** | **36.0%** | 38.9% | 25.1% |
 | 실험 D: LML=0.20 | — | — | — | — | — | ❌ 불안정 |
 | 실험 E: yaw+speed-scale 0.85~1.15 | 13.0 | 46.7% | 33.2% | 41.7% | 25.1% | ❌ 변화 없음 |
+| 실험 G: Smart 50-cand (LML=0.05) | 15.7 | 40.0% | 29.0% | **48.0%** | **23.0%** | Oracle↑ C↓ 좋음, 그러나 B-group↑ 나쁨 |
 
 ---
 
@@ -1135,3 +1137,100 @@ speed-scale best config = yaw-only(기존과 동일) → 즉시 Smart 50-cand로
 - C그룹 |perp| 초과(15.5%) 대응: `turn_p070`, `turn_n070` (|perp|=0.70)
 
 목표: Oracle ≥ 76%, Efficiency 유지(≥86%), OOF ≥ 0.655
+
+---
+
+### 2026-05-22 (11)
+
+**[실험 G — Smart 50-cand (LML=0.05) 결과]**
+
+설정: N_CANDIDATES=50 (10개 교체), AUG=yaw, LML=0.05
+
+**Fold별 결과**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6515 |
+| 2 | 0.6517 |
+| 3 | 0.6476 |
+| 4 | 0.6470 |
+| 5 | 0.6386 |
+| **CV mean** | **0.6473 ± 0.0048** |
+
+**기준(실험 B) 대비 비교**
+
+| 지표 | 실험 B (orig 50) | 실험 G (Smart 50) | 변화 |
+|---|---:|---:|---:|
+| OOF R-Hit | **0.6489** | 0.6473 | −0.16pp |
+| Oracle R-Hit | 0.7489 | **0.7702** | **+2.13pp ✓** |
+| Selector efficiency | **86.6%** | 84.0% | −2.6pp |
+| Oracle rank mean | 13.1 | 15.7 | −악화 |
+| Oracle rank median | 5 | 8 | −악화 |
+| Oracle in Top-5 | 47.1% | 40.0% | −7.1pp |
+| A그룹 | 33.4% | 29.0% | −4.4pp |
+| B그룹 | 41.5% | **48.0%** | **+6.5pp ← 최대 문제** |
+| C그룹 | 25.1% | **23.0%** | **−2.1pp ✓** |
+| Best temp | 1.0 | 1.5 | 변화 (logit 불확실성 증가 신호) |
+
+**Oracle 기여도 Top-15 (새 후보 중심)**
+
+| idx | name | count | % |
+|---:|---|---:|---:|
+| 22 | jerk_xxl_pos | 1233 | 12.3% |
+| 23 | jerk_xxl_neg | 1060 | 10.6% |
+| 24 | latency_s075 | 790 | 7.9% |
+| 43 | turn_p080 | 587 | 5.9% |
+| 44 | turn_n080 | 490 | 4.9% |
+| 30 | latency_l120 | 459 | 4.6% |
+
+새로 추가한 jerk_xxl±0.80이 전체의 22.9%, latency_s075 7.9%, turn_p080/n080 10.8% → 후보 교체가 oracle coverage를 실질적으로 넓힘.
+
+**C그룹 분석 (실험 G)**
+
+```
+C그룹: 2298개  (23.0%)  ← 기존 25.1%에서 2.1pp 감소
+nearest-cand dist  : mean=2.66cm  p50=1.71  p75=3.23  p90=5.59  p95=7.43
+
+현재 후보 커버리지: par=[0, 1.30]  |perp|≤0.80  |jerk|≤0.80
+C그룹 중 |perp| 초과: 9.6%  ← 기존 15.5%에서 5.9pp 감소 ✓
+C그룹 중 par 범위 밖: 18.9%  ← 기존 20.4%에서 1.5pp 감소 ✓
+
+C그룹 nearest: latency_s075 20.9%, jerk_xxl_pos 18.5%, turn_p080 14.3%
+→ 아직도 극단 후보들이 C그룹 nearest — 더 강한 보정이 필요하거나 selector가 이 후보들을 선택 못 하는 문제
+```
+
+**판정: 절반의 성공**
+
+- ✓ Oracle +2.13pp (74.89% → 77.02%): 신규 극단 후보들이 실질적으로 coverage 향상
+- ✓ C-group −2.1pp: 커버 못하는 케이스 감소
+- ✗ B-group +6.5pp (41.5% → 48.0%): selector가 극단 후보를 top-5에 못 넣음
+- ✗ Efficiency −2.6pp (86.6% → 84.0%): oracle rank 악화
+- ✗ Best temp 1.0→1.5: logit 신뢰도 하락 신호
+
+**왜 실패하는가:**
+신규 극단 후보(jerk_xxl=0.80, latency_s075=time_scale×0.75, turn_p080=perp×0.80)는 cand_features에서 비정상적으로 큰 feature 값을 보인다. selector가 "이 후보는 평소와 다르다" → 낮은 logit 부여. ListMLE(LML=0.05)의 oracle ranking 압력이 이 편향을 완전히 극복하지 못함.
+
+**핵심 관점 — 그럼에도 Smart 50이 가치 있는 이유:**
+
+```
+oracle 77.02%에서 efficiency 88%만 달성하면:
+OOF ≈ 0.677 → LB ≈ 0.702  (목표 달성!)
+
+원래 50-cand(oracle 74.89%)는 efficiency 93.5%가 필요했음.
+Smart 50은 efficiency 5pp 더 낮아도 같은 OOF를 낼 수 있다.
+```
+
+**[다음 실험: G2 — Smart 50-cand + LML=0.10]**
+
+```python
+LISTMLE_WEIGHT = 0.10  # 0.05 → 0.10
+```
+
+목적: 극단 후보의 oracle ranking 압력 강화 → B-group 감소 → efficiency 회복
+원래 50-cand에서 LML=0.10 결과: oracle rank mean 13.1 → 10.0 (-3.1), OOF 소폭 하락
+Smart 50-cand: oracle rank 15.7이 더 나쁘므로 LML=0.10 개선 여지 더 클 수 있음
+
+성공 기준: OOF ≥ 0.6480, oracle rank mean ≤ 12, B-group ≤ 44%
+실패 기준: OOF < 0.645, B-group 증가, oracle rank 악화
+
+→ G2 실패 시: Smart 50-cand 포기하고 original 50-cand (LML=0.05)로 multi-seed ensemble 진행
