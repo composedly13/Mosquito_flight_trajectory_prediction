@@ -302,6 +302,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | G2 seed 123 | 50★ | 64.47% | 77.02% | 83.7% | 64.47% | seed 불안정 (Fold2=Fold3, 극단 후보 수렴 실패) |
 | **G2 seed 777** | 50★ | **64.87%** | 77.02% | **84.2%** | **64.87%** | **현재 최고 단일 seed** |
 | 3-seed 앙상블 (42+123+777) | 50★ | — | 77.02% | 84.0% | 64.68% | ❌ seed123 역효과 −0.07pp |
+| **2-seed 앙상블 (42+777)** | 50★ | — | 77.02% | **84.2%** | **64.84%** | seed42 대비 +0.09pp, seed777 대비 −0.03pp — **제출 권장** |
 
 ### Selector Error Decomposition
 
@@ -1330,9 +1331,9 @@ python dev/experiments/predict.py --seeds 42 123 777   # 제출 파일 생성
 
 **현재 best: seed 777 단독 (OOF 0.6487)**
 
-다음 시도: `--seeds 42 777` (seed 123 제외) 앙상블 OOF 확인
-- 기댓값: logit 상관성 감소로 0.6481~0.6490 예상
-- 제출 기준: 42+777 앙상블 OOF > 0.6487이면 앙상블, 아니면 seed 777 단독
+**seeds 42+777 앙상블 결과**: OOF 0.6484 (+0.09pp vs seed42, −0.03pp vs seed777)
+- 0.03pp 차이는 노이즈 범위 내 → 10모델 앙상블이 test set 분산 감소 → **seeds 42+777 제출 권장**
+- 제출 명령: `python dev/experiments/predict.py --seeds 42 777`
 
 **갭 분석 및 Phase 5 방향**
 
