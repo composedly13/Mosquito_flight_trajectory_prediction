@@ -252,14 +252,14 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 항목 | 현재 설정 |
 |---|---|
 | Candidates | **50개** (Frenet + turn + jerk — 60-cand 실험 후 efficiency 역행으로 복귀) |
-| Augmentation | **yaw + speed-scale** (RANGE=0.85~1.15, PROB=0.5 — 실험 중) |
+| Augmentation | **yaw-only** (speed-scale 0.85~1.15 실험 결과 효과 없음 → 복귀) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
 | Loss | **CE + PW×0.25 + LML×0.05** (그리드 탐색 A~D 완료, 0.05 최적 확정) |
 | Prediction | **Top-10** weighted average, temp=1.0 (config.TOPK로 통일) |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.89%** (yaw-only baseline, LML=0.05) |
+| CV R-Hit | **64.89%** (yaw-only, LML=0.05 — current best) |
 | Oracle ceiling | **74.89%** (50-cand 기준) |
 | Selector efficiency | **86.3%** (목표: 93.5% → 70% 달성 조건) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
@@ -294,8 +294,9 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 B: LML=0.05 | 50 | **64.89%** | 74.89% | **86.6%** | **64.89%** | oracle rank mean 13.1 — **현재 best** |
 | 실험 C: LML=0.10 | 50 | 64.80% | 74.89% | 86.5% | 64.80% | oracle rank mean 10.0 |
 | 실험 D: LML=0.20 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ std↑ fold5↓, 불안정 |
-| **실험 E**: yaw+speed-scale 0.85~1.15 | 50 | — | — | — | — | 진행 예정 |
-| 실험 F: speed-scale 0.80~1.20 | 50 | — | — | — | — | E 개선 시 |
+| 실험 E: yaw+speed-scale 0.85~1.15 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ -0.24pp, 효과 없음 → yaw 복귀 |
+| 실험 F: speed-scale 0.80~1.20 | 50 | — | — | — | — | ❌ E 실패로 건너뜀 |
+| **실험 G**: Smart 50-cand (후보 교체) | 50\* | — | — | — | — | 진행 예정 |
 
 ### Selector Error Decomposition
 
@@ -308,6 +309,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 B: LML=0.05 | **13.1** | **47.1%** | **33.4%** | 41.5% | 25.1% |
 | 실험 C: LML=0.10 | **10.0** | **51.8%** | **36.0%** | 38.9% | 25.1% |
 | 실험 D: LML=0.20 | — | — | — | — | — | ❌ 불안정 |
+| 실험 E: yaw+speed-scale 0.85~1.15 | 13.0 | 46.7% | 33.2% | 41.7% | 25.1% | ❌ 변화 없음 |
 
 ---
 
@@ -1026,3 +1028,110 @@ python dev/experiments/analyze.py --seed 42
 ```
 
 성공 기준: OOF ≥ 0.651, efficiency ≥ 84%, oracle rank mean 하락, B그룹% 감소.
+
+---
+
+### 2026-05-22 (10)
+
+**[실험 E — yaw + speed-scale(0.85~1.15) 결과 및 결론]**
+
+설정: `AUG_MODE='yaw_speed', SPEED_SCALE_RANGE=(0.85, 1.15), SPEED_SCALE_PROB=0.5`
+
+**Fold별 결과**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6554 |
+| 2 | 0.6404 |
+| 3 | 0.6486 |
+| 4 | 0.6500 |
+| 5 | 0.6381 |
+| **CV mean** | **0.6465 ± 0.0064** |
+
+**베이스라인(실험 B, yaw-only) 대비 비교**
+
+| 지표 | 실험 B (yaw) | 실험 E (yaw+speed) | 변화 |
+|---|---:|---:|---:|
+| OOF R-Hit | **0.6489** | 0.6465 | **−0.24pp** |
+| Oracle R-Hit | 0.7489 | 0.7489 | 0 |
+| Selector efficiency | **86.6%** | 86.3% | −0.3pp |
+| Oracle rank mean | 13.1 | 13.0 | −0.1 |
+| Oracle rank median | 5 | 5 | 0 |
+| Oracle in Top-5 | 47.1% | 46.7% | −0.4pp |
+| A그룹 | 33.4% | 33.2% | −0.2pp |
+| B그룹 | **41.5%** | 41.7% | +0.2pp |
+| C그룹 | 25.1% | 25.1% | 0 |
+| Best Top-k | 10 | 10 | — |
+| Best temp | 1.0 | 1.0 | — |
+
+**analyze.py 전체 결과 (실험 E)**
+
+```
+Oracle candidate rank statistics:
+  mean=13.0  median=5  p75=20  p90=43
+Oracle in Top- 1: 0.1829
+Oracle in Top- 3: 0.3651
+Oracle in Top- 5: 0.4669
+Oracle in Top- 7: 0.5460
+Oracle in Top-10: 0.6236
+
+A: oracle hit & in top-5   :  3316샘플 (33.2%) | Top-1=0.8706  Top-5=0.8890  Top-10=0.8745
+B: oracle hit & NOT top-5  :  4173샘플 (41.7%) | Top-1=0.7850  Top-5=0.8277  Top-10=0.8541
+C: oracle miss (cand limit):  2511샘플 (25.1%) | Top-1=0.0000  Top-5=0.0008  Top-10=0.0004
+```
+
+**C그룹 분석 (실험 E — 기준과 동일)**
+
+```
+C그룹: 2511개  (25.1%)
+nearest-cand dist  : mean=2.70cm  p50=1.72  p75=3.23  p90=5.81  p95=7.79
+
+True label (Frenet, speed×2 정규화):
+par  : mean=0.77  std=0.66  p5=-0.35  p95=1.29
+perp : mean=0.15  std=0.59  |p5|=0.02  |p75|=0.45  |p95|=1.02
+jerk : mean=0.48  p75=0.55  p95=1.70
+
+현재 후보 커버리지: par=[0, 1.20]  |perp|≤0.60  |jerk|≤0.50
+C그룹 중 |perp| 초과: 15.5%
+C그룹 중 par 범위 밖: 20.4%
+
+C그룹 nearest 후보:
+  latency_s085   21.8%
+  jerk_xl_pos    16.1%
+  turn_p060      14.1%
+  jerk_xl_neg    10.9%
+  turn_n060       9.4%
+```
+
+**결론: speed-scale(0.85~1.15) 효과 없음 — 0.8~1.2 건너뜀, yaw-only 복귀**
+
+- OOF −0.24pp는 CV std(0.0064) 범위 내 노이즈지만, 개선 조건(OOF ≥ 0.653) 미달
+- Oracle rank / A/B/C 그룹 비율 모두 기준과 사실상 동일 → 유의미한 변화 없음
+- 왜 효과 없었나:
+  - speed-scale은 selector가 절대 속도보다 방향/패턴을 보도록 유도하는 augmentation
+  - 그러나 이미 Frenet 피처로 정규화되어 있어 → selector는 이미 상대적 패턴 학습 중
+  - 즉, speed-scale이 해결하려는 문제가 현재 구조에서는 존재하지 않음
+- `config.py` `AUG_MODE='yaw'` 복귀
+
+**다음 단계: Smart 50-cand 재설계**
+
+speed-scale best config = yaw-only(기존과 동일) → 즉시 Smart 50-cand로 이동 가능.
+
+| 이유 | 근거 |
+|---|---|
+| C그룹 25.1% 고착 | Oracle ceiling이 74.89%로 묶임 → 후보 공간 자체 개선 필요 |
+| B그룹 41.7% 최대 병목 | Selector가 oracle 후보를 top-5 밖으로 밀어냄 → 노이즈 후보 제거로 난이도 완화 |
+| 60-cand 실패 교훈 | 후보 수 증가 금지, 50개 유지하면서 저기여 후보를 고가치 후보로 교체 |
+
+**Smart 50-cand 설계 원칙**
+
+제거 후보 기준 (oracle 기여도 하위 + 중복성 높음):
+- `frenet_par090_p000`, `frenet_par100_p000`, `frenet_par100_n010` 등 파라미터 차이 작은 Frenet 계열
+- `jerk_small_pos/neg` (jerk=±0.08, 기여도 미미 — jerk_l/xl이 이미 상위권 커버)
+
+추가 후보 기준 (C그룹 분석 기반):
+- `latency_s080` / `latency_s075`: latency_s085가 C그룹 nearest 21.8% → 더 강한 보정 필요
+- C그룹 par 초과(20.4%) 대응: `frenet_par130_n020`, `frenet_par140_n030`
+- C그룹 |perp| 초과(15.5%) 대응: `turn_p070`, `turn_n070` (|perp|=0.70)
+
+목표: Oracle ≥ 76%, Efficiency 유지(≥86%), OOF ≥ 0.655

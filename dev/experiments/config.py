@@ -20,9 +20,10 @@ PATIENCE    = 40        # early stopping
 # Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
 # 'yaw'       : z-axis rotation only (safe for LiDAR z=UP frame)
 # 'yaw_speed' : yaw + speed-scale (scale displacements around last point p0)
-AUG_MODE          = 'yaw_speed'
-SPEED_SCALE_RANGE = (0.85, 1.15)   # Uniform scale range; first experiment
-SPEED_SCALE_PROB  = 0.5            # fraction of samples that get scaled
+# yaw_speed(0.85~1.15) 실험 결과: OOF -0.24pp (0.6489→0.6465), 효과 없음 → yaw 복귀
+AUG_MODE          = 'yaw'
+SPEED_SCALE_RANGE = (0.85, 1.15)   # Uniform scale range (실험 보존용)
+SPEED_SCALE_PROB  = 0.5            # fraction of samples that get scaled (실험 보존용)
 
 # Selector Model (Transformer)
 # d256 run result: CV 0.6365 (worse than d128 0.6410) — likely overfitting on 8k samples
