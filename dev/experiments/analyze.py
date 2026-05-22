@@ -89,6 +89,65 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
     return preds
 
 
+def load_all_models(seeds: list, device: torch.device) -> dict:
+    """Load fold models for multiple seeds. Returns {seed: {fold_idx: model}}."""
+    all_models = {}
+    for seed in seeds:
+        model_dir = OUTPUT_DIR / f"seed{seed}"
+        fold_models = {}
+        for fold in range(N_FOLDS):
+            path = model_dir / f"selector_fold{fold}.pt"
+            if path.exists():
+                m = CandidateSelector().to(device)
+                m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+                m.eval()
+                fold_models[fold] = m
+        if fold_models:
+            all_models[seed] = fold_models
+            print(f"  seed{seed}: {len(fold_models)}/{N_FOLDS} folds 로드")
+        else:
+            print(f"  seed{seed}: 모델 없음 (python train.py --seed {seed} 먼저 실행)")
+    return all_models
+
+
+def get_oof_preds_multiseed(
+    all_models: dict,
+    ids: list,
+    coords: np.ndarray,
+    device: torch.device,
+    topk: int = 10,
+    temp: float = 1.0,
+) -> np.ndarray:
+    """Multi-seed OOF: for each fold, average logits across seeds then predict."""
+    N = len(ids)
+    preds = np.zeros((N, 3), dtype=np.float32)
+    seeds = list(all_models.keys())
+
+    for fold_idx in range(N_FOLDS):
+        val_mask = np.array([fold_id(i) == fold_idx for i in ids])
+        if not val_mask.any():
+            continue
+        val_coords = coords[val_mask]
+        val_pos    = np.where(val_mask)[0]
+
+        fold_models = [all_models[s][fold_idx] for s in seeds if fold_idx in all_models[s]]
+        if not fold_models:
+            continue
+
+        for start in range(0, len(val_coords), BATCH_SIZE):
+            end = min(start + BATCH_SIZE, len(val_coords))
+            c = torch.tensor(val_coords[start:end]).to(device)
+            with torch.no_grad():
+                cands_t    = make_candidates_gpu(c)
+                seq_t      = make_seq_features_gpu(c)
+                cand_t     = make_cand_features_gpu(c, cands_t)
+                avg_logits = sum(m(seq_t, cand_t) for m in fold_models) / len(fold_models)
+                pred       = selector_predict(avg_logits, cands_t, topk=topk, temp=temp)
+            preds[val_pos[start:end]] = pred.cpu().numpy()
+
+    return preds
+
+
 def candidate_oracle_report(coords: np.ndarray, labels: np.ndarray) -> tuple:
     """Detailed oracle analysis: percentiles, top oracle candidate indices."""
     cands     = make_candidates(coords)                              # (N, C, 3)
@@ -286,7 +345,11 @@ def oracle_selector_decomposition(
         print("  → A그룹: Top-1 ≈ Top-5 → 가중 평균 영향 미미")
 
 
-def analyze(seed: int = SEED):
+def analyze(seeds: list = None):
+    if seeds is None:
+        seeds = [SEED]
+    seed = seeds[0]  # primary seed for sections 1-6
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
 
@@ -294,7 +357,8 @@ def analyze(seed: int = SEED):
     print("=" * 55)
     print("EXPERIMENT CONFIG")
     print("=" * 55)
-    print(f"  seed={seed}  |  N_FOLDS={N_FOLDS}  |  N_CANDIDATES={N_CANDIDATES}")
+    seeds_str = str(seeds) if len(seeds) > 1 else str(seed)
+    print(f"  seeds={seeds_str}  |  N_FOLDS={N_FOLDS}  |  N_CANDIDATES={N_CANDIDATES}")
     print(f"  AUG_MODE={AUG_MODE}", end="")
     if AUG_MODE == 'yaw_speed':
         print(f"  scale={SPEED_SCALE_RANGE}  prob={SPEED_SCALE_PROB}", end="")
@@ -303,7 +367,7 @@ def analyze(seed: int = SEED):
     print(f"  D_MODEL={D_MODEL}  |  NUM_LAYERS={NUM_LAYERS}  |  DROPOUT={DROPOUT}")
     print()
 
-    # Models are saved in per-seed subdirectories by train.py
+    # Load primary seed models for sections 1-6
     model_dir = OUTPUT_DIR / f"seed{seed}"
     print(f"모델 디렉토리: {model_dir}  (seed={seed})")
 
@@ -316,7 +380,7 @@ def analyze(seed: int = SEED):
             m.eval()
             models[fold] = m
     if not models:
-        print("저장된 모델 없음. python train.py --seed {seed} 먼저 실행.")
+        print(f"저장된 모델 없음. python train.py --seed {seed} 먼저 실행.")
         return
     print(f"모델 {len(models)}개 로드 완료\n")
 
@@ -419,10 +483,43 @@ def analyze(seed: int = SEED):
     print(f"\n  oracle↔selector 갭    : {gap:.4f}  ({gap*100:.1f}pp)")
     print(f"  70% 달성 조건          : efficiency ≥ {0.70/oracle:.1%}")
 
+    # ── 7. Multi-seed ensemble OOF ────────────────────────────────
+    if len(seeds) > 1:
+        n_total = len(seeds) * N_FOLDS
+        print("\n" + "=" * 55)
+        print(f"7. MULTI-SEED ENSEMBLE OOF  ({len(seeds)} seeds × {N_FOLDS} folds = {n_total} models)")
+        print("=" * 55)
+        print("  모델 로드 중...")
+        all_models = load_all_models(seeds, device)
+        n_loaded = sum(len(v) for v in all_models.values())
+        if n_loaded < 2:
+            print("  로드된 모델 부족. 각 seed 학습 완료 후 재실행.")
+        else:
+            print(f"  총 {n_loaded}개 모델 로드 완료\n")
+            ms_preds = get_oof_preds_multiseed(
+                all_models, ids, coords, device, topk=best_k, temp=best_temp
+            )
+            ms_hit   = r_hit(ms_preds, labels)
+            print(f"  Single-seed OOF (seed={seed})    : {best_hit:.4f}")
+            print(f"  Multi-seed  OOF ({len(seeds)} seeds)  : {ms_hit:.4f}  ({(ms_hit - best_hit)*100:+.2f}pp)")
+            print(f"  Oracle ceiling                 : {oracle:.4f}")
+            print(f"  Multi-seed efficiency          : {ms_hit/oracle:.1%} of oracle")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=SEED,
-                        help="Which seed's models to analyze (default: config.SEED)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--seed",  type=int, default=None,
+                       help="Single seed to analyze (default: config.SEED)")
+    group.add_argument("--seeds", type=int, nargs="+", default=None,
+                       help="Multiple seeds for ensemble OOF, e.g. --seeds 42 123 777")
     args = parser.parse_args()
-    analyze(seed=args.seed)
+
+    if args.seeds:
+        seeds = args.seeds
+    elif args.seed is not None:
+        seeds = [args.seed]
+    else:
+        seeds = [SEED]
+
+    analyze(seeds=seeds)
