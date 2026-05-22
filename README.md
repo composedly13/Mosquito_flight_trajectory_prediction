@@ -235,7 +235,7 @@ python dev/experiments/predict.py
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **50개** (Frenet + turn + jerk + 복합) |
+| Candidates | **60개** (Frenet + turn + jerk 확장 — C그룹 대응) |
 | Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Seq features | **11개** (jerk_abs, acc_cos 추가 — SEQ_DIM 9→11) |
@@ -243,8 +243,8 @@ python dev/experiments/predict.py
 | Prediction | **Top-10** weighted average, temp=1.0 |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.61%** (현재 최고) |
-| Oracle ceiling | **74.89%** |
+| CV R-Hit | **64.61%** (50-cand 기준 / 60-cand 재학습 대기 중) |
+| Oracle ceiling | **74.89%** → 60-cand 재학습 후 78~80% 목표 |
 | Selector efficiency | **86.3%** (Oracle rank mean=7.8 / 목표: 93.5% → 70% 달성) |
 
 ---
@@ -744,18 +744,68 @@ C그룹(25.1%, 약 2,511샘플)은 현재 후보 50개 중 어떤 것도 1cm 이
   - 현재 후보 커버리지 경계와 비교 → 어느 방향/범위가 미커버인지 파악
   - C그룹에 가장 가까운 기존 후보 top-10 표시
 - `analyze()` 본체의 섹션 4 직후에 섹션 4b로 연결 완료
-- 다음: `python analyze.py` 실행 → C그룹 Frenet 분포 확인 → 후보 파라미터 확장
 
-**현재 파이프라인 업데이트**
+---
+
+### 2026-05-22 (7)
+
+**[C그룹 분석 결과 — analyze.py 4b 섹션 출력]**
+
+```
+C그룹: 2511개  (25.1%)
+nearest-cand dist  : mean=2.70cm  p50=1.72  p75=3.23  p90=5.81  p95=7.79
+
+True label (Frenet, speed×2 정규화):
+par  : mean=0.77  std=0.66  p5=-0.35  p95=1.29
+perp : mean=0.15  std=0.59  |p5|=0.02  |p75|=0.45  |p95|=1.02
+jerk : mean=0.48  p75=0.55  p95=1.70
+
+현재 후보 커버리지: par=[0, 1.20]  |perp|≤0.60  |jerk|≤0.50
+C그룹 중 |perp| 초과: 15.5%
+C그룹 중 par 범위 밖: 20.4%
+```
+
+**C그룹 nearest 후보 분포**
+
+| 후보 | C그룹 nearest 비율 | 의미 |
+|---|---:|---|
+| latency_s085 | 21.8% | 시간 보정 필요하나 frenet도 맞지 않음 |
+| jerk_xl_pos + jerk_xl_neg | 27.0% | jerk 더 강한 후보 필요 (max 0.50, 필요 1.70) |
+| turn_p060 + turn_n060 | 23.5% | perp 더 큰 후보 필요 (max 0.60, 필요 1.02) |
+
+**핵심 갭**
+
+| 파라미터 | 현재 커버리지 | C그룹 p75 | C그룹 p95 | 초과 비율 |
+|---|---:|---:|---:|---:|
+| `\|jerk\|` | 0.50 | 0.55 | **1.70** | — |
+| `\|perp\|` | 0.60 | 0.45 | **1.02** | **15.5%** |
+| `par` | [0, 1.20] | — | 1.29 | **20.4%** |
+
+**[candidates.py 수정 — 50 → 60개]**
+
+C그룹 분석 기반으로 10개 후보 추가:
+
+| 계열 | 이름 | jerk | perp | 근거 |
+|---|---|---:|---:|---|
+| Jerk 확장 | `jerk_xxl_pos/neg` | ±0.80 | 0 | C그룹 nearest 27%, jerk gap |
+| | `jerk_xxxl_pos/neg` | ±1.20 | 0 | C그룹 jerk p75=0.55 |
+| | `jerk_extreme_pos/neg` | ±1.80 | 0 | C그룹 jerk p95=1.70 |
+| Perp 확장 | `turn_p080/n080` | 0 | ±0.80 | C그룹 nearest 23.5%, |perp| gap |
+| | `turn_p100/n100` | 0 | ±1.00 | C그룹 \|perp\| p95=1.02 |
+
+- d1 / par 값은 jerk·perp 크기에 따라 단계적으로 감소 (물리적 일관성 유지)
+- **50 → 60개, oracle ceiling 78~80% 목표** (현재 74.89%)
+- 재학습 후 analyze.py로 C그룹 비율 및 oracle 변화 확인 예정
+
+**현재 파이프라인**
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **50개** |
+| Candidates | **60개** (재학습 전) |
 | Augmentation | **yaw-only** |
-| Seq features | **11개** (jerk_abs, acc_cos 추가) |
+| Seq features | **11개** (jerk_abs, acc_cos) |
 | Loss | **CE + PW×0.25 + ListMLE×0.5** |
 | Prediction | **Top-10**, temp=1.0 |
-| CV R-Hit | **64.61%** (현재 최고) |
-| Oracle ceiling | **74.89%** |
-| Selector efficiency | **86.3%** |
-| Oracle rank | mean=7.8, median=4 |
+| CV R-Hit | **64.61%** (50-cand 기준, 재학습 대기 중) |
+| Oracle ceiling | 74.89% → **재학습 후 측정** |
+| Selector efficiency | 86.3% → **재학습 후 측정** |

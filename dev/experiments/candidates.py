@@ -91,6 +91,20 @@ CANDIDATES = [
     CandidateSpec("tj_pn20",           1.98,  0.85,  0.20, jerk=-0.20),
     CandidateSpec("tj_nn20",           1.98,  0.85, -0.20, jerk=-0.20),
     CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
+
+    # C그룹 대응: 강한 Jerk 확장 (현재 max ±0.50, C그룹 jerk p95=1.70)
+    CandidateSpec("jerk_xxl_pos",      1.94,  0.76,  0.00, jerk= 0.80),
+    CandidateSpec("jerk_xxl_neg",      1.94,  0.76,  0.00, jerk=-0.80),
+    CandidateSpec("jerk_xxxl_pos",     1.92,  0.68,  0.00, jerk= 1.20),
+    CandidateSpec("jerk_xxxl_neg",     1.92,  0.68,  0.00, jerk=-1.20),
+    CandidateSpec("jerk_extreme_pos",  1.88,  0.58,  0.00, jerk= 1.80),
+    CandidateSpec("jerk_extreme_neg",  1.88,  0.58,  0.00, jerk=-1.80),
+
+    # C그룹 대응: 강한 Perp 확장 (현재 max ±0.60, C그룹 |perp| p95=1.02)
+    CandidateSpec("turn_p080",         1.82,  0.42,  0.80),
+    CandidateSpec("turn_n080",         1.82,  0.42, -0.80),
+    CandidateSpec("turn_p100",         1.72,  0.30,  1.00),
+    CandidateSpec("turn_n100",         1.72,  0.30, -1.00),
 ]
 
 N_CANDIDATES = len(CANDIDATES)
