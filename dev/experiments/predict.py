@@ -50,7 +50,7 @@ def load_boundary(device: torch.device):
     return m
 
 
-def predict(seeds: list = None, beta: float = 1.0):
+def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
     if seeds is None:
         seeds = [SEED]
     torch.manual_seed(seeds[0])
@@ -84,7 +84,7 @@ def predict(seeds: list = None, beta: float = 1.0):
             seq_t   = make_seq_features_gpu(c)
             cand_t  = make_cand_features_gpu(c, cands_t)
             avg_logits = sum(m(seq_t, cand_t) for m in selectors) / len(selectors)
-            pred       = selector_predict(avg_logits, cands_t, topk=TOPK)
+            pred       = selector_predict(avg_logits, cands_t, topk=TOPK, temp=temp)
 
         all_preds.append(pred.cpu().numpy())
         all_logits.append(avg_logits.cpu().numpy())
@@ -139,7 +139,9 @@ if __name__ == "__main__":
     group.add_argument("--seeds", type=int, nargs="+", default=None,
                        help="Multiple seeds, e.g. --seeds 42 777")
     parser.add_argument("--beta", type=float, default=1.0,
-                        help="Entropy-blend strength: 0=pure selector, 1=full switch (default: 1.0)")
+                        help="Entropy-blend strength: 0=pure selector (default: 1.0)")
+    parser.add_argument("--temp", type=float, default=2.0,
+                        help="Softmax temperature for Top-k weighted avg (default: 2.0)")
     args = parser.parse_args()
 
     if args.seeds:
@@ -149,4 +151,4 @@ if __name__ == "__main__":
     else:
         seeds = [SEED]
 
-    predict(seeds=seeds, beta=args.beta)
+    predict(seeds=seeds, beta=args.beta, temp=args.temp)
