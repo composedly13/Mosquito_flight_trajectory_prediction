@@ -145,7 +145,7 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 | 항목 | 설정 |
 |---|---|
 | K-Fold | 5-Fold (MD5 해시 기반 안정적 분할) |
-| 데이터 증강 | **yaw-only** (z축 회전, z=UP 좌표계 보존) — 배치 단위 GPU 수행 |
+| 데이터 증강 | **yaw + speed-scale** (z축 회전 + p0 기준 이동량 스케일, z=UP 보존) |
 | 옵티마이저 | AdamW (lr=3e-4, weight_decay=1e-4) |
 | 스케줄러 | CosineAnnealingLR (T_max=EPOCHS, epoch 단위 step) |
 | Early Stopping | patience=40 |
@@ -158,8 +158,8 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 | 셀렉터 | Attn-GRU | **Transformer + Cross-Attention** |
 | 후보 수 | 28개 | **50개** |
 | Seq features | — | **11개** (jerk_abs, acc_cos 추가) |
-| 학습 | 단일 모델 | **5-Fold 앙상블** |
-| 증강 | 없음 | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
+| 학습 | 단일 모델 | **5-Fold 앙상블, multi-seed 지원** |
+| 증강 | 없음 | **yaw + speed-scale** (z=UP 보존 + 속도 스케일 일반화) |
 | 손실 | CE | **Soft-CE + Pairwise + ListMLE** |
 | Top-k 예측 | Top-1 (argmax) | **Top-10 가중 평균** |
 | Boundary | 전체 데이터 적용 | **완전 제거** (−7.9pp 확인) |
@@ -183,12 +183,15 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 │   └── experiments/             # 모델 코드
 │       ├── config.py            # 경로 및 하이퍼파라미터
 │       ├── candidates.py        # Frenet 기반 후보 생성 + 피처 추출
-│       ├── dataset.py           # MosquitoDataset (raw coords 반환) + augment_batch_gpu
+│       ├── dataset.py           # MosquitoDataset + augment_batch_gpu / augment_speed_scale_gpu
 │       ├── model.py             # CandidateSelector (Transformer)
 │       ├── boundary.py          # BoundaryMLP (잔차 보정)
 │       ├── train.py             # K-Fold 학습 루프
 │       ├── predict.py           # 앙상블 추론 + 제출 파일 생성
 │       └── outputs/             # 저장된 모델 가중치 (레포 미포함)
+│           ├── seed42/          #   seed별 서브디렉토리 (train.py --seed 42)
+│           ├── seed123/
+│           └── seed777/
 ├── README.md
 └── requirements.txt
 ```
@@ -219,16 +222,27 @@ $env:KMP_DUPLICATE_LIB_OK = "TRUE"
 ```bash
 # 데이터 준비: data/ 폴더에 대회 데이터 압축 해제
 
-# 학습 (5-Fold)
+# ── 단일 seed 학습 (기본: seed=42) ──────────────────────────────────────────
 cd D:\Mosquito
-python dev/experiments/train.py
+python dev/experiments/train.py              # seed=42 (config.SEED 기본값)
+python dev/experiments/train.py --seed 123   # 다른 seed
+# → dev/experiments/outputs/seed{N}/selector_fold{0..4}.pt
 
-# 추론 및 제출 파일 생성
-python dev/experiments/predict.py
+# ── 진단 (OOF 분석 — 학습 후 실행) ──────────────────────────────────────────
+python dev/experiments/analyze.py            # seed=42 기준
+python dev/experiments/analyze.py --seed 123
+
+# ── 추론 및 제출 파일 생성 ────────────────────────────────────────────────────
+python dev/experiments/predict.py            # seed=42 단일
+python dev/experiments/predict.py --seed 123
+python dev/experiments/predict.py --seeds 42 123 777  # 3-seed ensemble (15 models)
 # → dev/experiments/outputs/submission.csv
 
-# 진단 (OOF 분석 — 학습 후 실행)
-python dev/experiments/analyze.py
+# ── 3-seed 앙상블 전체 학습 ──────────────────────────────────────────────────
+python dev/experiments/train.py --seed 42
+python dev/experiments/train.py --seed 123
+python dev/experiments/train.py --seed 777
+python dev/experiments/predict.py --seeds 42 123 777
 ```
 
 ---
@@ -238,16 +252,17 @@ python dev/experiments/analyze.py
 | 항목 | 현재 설정 |
 |---|---|
 | Candidates | **50개** (Frenet + turn + jerk — 60-cand 실험 후 efficiency 역행으로 복귀) |
-| Augmentation | **yaw-only** (z=UP 보존, SO3 대비 +4.8pp) |
+| Augmentation | **yaw + speed-scale** (RANGE=0.85~1.15, PROB=0.5 — 실험 중) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
 | Loss | **CE + PW×0.25 + LML×0.05** (그리드 탐색 A~D 완료, 0.05 최적 확정) |
 | Prediction | **Top-10** weighted average, temp=1.0 (config.TOPK로 통일) |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.89%** (실험 B, LML=0.05 최적) |
+| CV R-Hit | **64.89%** (yaw-only baseline, LML=0.05) |
 | Oracle ceiling | **74.89%** (50-cand 기준) |
 | Selector efficiency | **86.3%** (목표: 93.5% → 70% 달성 조건) |
+| Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
 
@@ -276,9 +291,11 @@ python dev/experiments/analyze.py
 | 50-cand (yaw), SEQ11+LML=0.5 | 50 | 64.61% | 74.89% | 86.3% | 64.61% | oracle rank 22→7.8 |
 | 60-cand (yaw), SEQ11+LML=0.5 | 60 | 63.75% | **78.31%** | 81.4% | 63.75% | ❌ efficiency 역행 |
 | **실험 A**: 50-cand, LML=0.0 | 50 | **64.66%** | 74.89% | **86.3%** | **64.66%** | clean baseline ★ |
-| 실험 B: LML=0.05 | 50 | **64.89%** | 74.89% | **86.6%** | **64.89%** | oracle rank mean 13.1 |
+| 실험 B: LML=0.05 | 50 | **64.89%** | 74.89% | **86.6%** | **64.89%** | oracle rank mean 13.1 — **현재 best** |
 | 실험 C: LML=0.10 | 50 | 64.80% | 74.89% | 86.5% | 64.80% | oracle rank mean 10.0 |
 | 실험 D: LML=0.20 | 50 | 64.65% | 74.89% | 86.3% | 64.65% | ❌ std↑ fold5↓, 불안정 |
+| **실험 E**: yaw+speed-scale 0.85~1.15 | 50 | — | — | — | — | 진행 예정 |
+| 실험 F: speed-scale 0.80~1.20 | 50 | — | — | — | — | E 개선 시 |
 
 ### Selector Error Decomposition
 
@@ -928,14 +945,84 @@ Oracle ranking 지표는 계속 개선됐으나 OOF가 0.09pp 소폭 하락. 노
 
 **결론:** `LISTMLE_WEIGHT=0.05`가 최적. OOF가 높으면서 std가 안정적인 구간. 이상 config 확정 — 이후 실험의 baseline으로 사용.
 
-**[현재 확정 Config]**
+**[현재 확정 Config (LML 그리드 이후)]**
 
 ```python
 CANDIDATES      = 50
-AUG_MODE        = 'yaw'
+AUG_MODE        = 'yaw'       # → 'yaw_speed'로 교체 예정
 SOFT_TEMP       = 0.005
 PAIRWISE_WEIGHT = 0.25
-LISTMLE_WEIGHT  = 0.05   # ← 확정
+LISTMLE_WEIGHT  = 0.05
 TOPK            = 10
 D_MODEL         = 128
 ```
+
+---
+
+### 2026-05-22 (9)
+
+**[실험 로드맵 수립 및 speed-scale augmentation 구현]**
+
+현재 best OOF 0.6489(≈LB 0.674 예상) 기준 LB 0.70 달성을 위한 단계별 계획 확정.
+
+**목표 갭 분석**
+
+| 단계 | 목표 OOF | 예상 LB | 핵심 변경 |
+|---|---:|---:|---|
+| 현재 | 0.6489 | ~0.674 | baseline |
+| speed-scale | 0.653~0.658 | ~0.678~0.683 | augmentation 일반화 |
+| smart-50 | 0.658~0.665 | ~0.683~0.690 | 후보 교체 (수 유지) |
+| 3-seed ensemble | 0.665~0.670 | ~0.690~0.695 | 15-model logit avg |
+| reg blend | 0.670~0.675 | ~0.695~0.700 | direct regression 보완 |
+
+**[speed-scale augmentation 구현]**
+
+`dataset.py`에 `augment_speed_scale_gpu()` 추가:
+
+```python
+def augment_speed_scale_gpu(coords, labels, scale_range=(0.85, 1.15), prob=0.5):
+    """마지막 관측점 p0 기준으로 모든 이동량을 스케일링.
+    yaw 이후 적용하여 '같은 방향이지만 다른 속도'의 궤적 생성."""
+    scale = Uniform(lo, hi), Bernoulli(prob)로 샘플별 스케일 결정
+    coords_aug = p0 + scale * (coords - p0)   # p0은 고정
+    labels_aug = p0 + scale * (label  - p0)
+```
+
+- p0(마지막 관측점)은 불변 — 예측 기준점은 바뀌지 않음
+- 후보 생성(d1/acc/jerk)도 동일 비율 스케일 → 후보 피처의 상대 비율 보존
+- 목적: selector가 절대 속도보다 Frenet 방향 패턴과 후보 ranking에 집중하도록 유도
+
+`config.py`:
+```python
+AUG_MODE          = 'yaw_speed'
+SPEED_SCALE_RANGE = (0.85, 1.15)
+SPEED_SCALE_PROB  = 0.5
+```
+
+**[multi-seed 앙상블 인프라 구현]**
+
+train.py / analyze.py / predict.py 에 CLI 인자 추가:
+
+```bash
+python train.py --seed 42          # seed별 서브디렉토리에 저장
+python analyze.py --seed 42        # 해당 seed 모델 로드
+python predict.py --seeds 42 123 777  # 15-model logit 평균 앙상블
+```
+
+- 모델 저장 경로: `outputs/seed{N}/selector_fold{i}.pt`
+- 앙상블 방식: 각 모델의 logit을 평균 → `selector_predict(topk=TOPK)` (좌표 평균보다 우수)
+
+**[analyze.py 개선]**
+
+- `oracle_selector_decomposition()`: Oracle rank Top-10 추가, 그룹별 `Top-10 hit` 출력
+- `oracle_rank < k` 탐색 범위: `[1, 3, 5, 7]` → `[1, 3, 5, 7, 10]`
+
+**[다음 실험]**
+
+```bash
+# speed-scale 첫 실험 (AUG_MODE='yaw_speed', RANGE=0.85~1.15)
+python dev/experiments/train.py --seed 42
+python dev/experiments/analyze.py --seed 42
+```
+
+성공 기준: OOF ≥ 0.651, efficiency ≥ 84%, oracle rank mean 하락, B그룹% 감소.

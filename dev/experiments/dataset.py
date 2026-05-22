@@ -81,6 +81,30 @@ def augment_batch_gpu_yaw_with_R(coords: torch.Tensor):
     return torch.bmm(coords, R.mT), R
 
 
+def augment_speed_scale_gpu(
+    coords: torch.Tensor,
+    labels: torch.Tensor,
+    scale_range: tuple = (0.85, 1.15),
+    prob: float = 0.5,
+) -> tuple:
+    """Speed-scale augmentation: scale all displacements relative to the last point p0.
+
+    Simulates the mosquito moving faster or slower without changing direction.
+    p0 (coords[:, 10]) remains fixed; all other points and the label scale around it.
+    This encourages the selector to learn scale-invariant ranking, not absolute speed.
+    """
+    B, dev, dt = coords.shape[0], coords.device, coords.dtype
+    lo, hi = scale_range
+    scale = torch.rand(B, device=dev, dtype=dt) * (hi - lo) + lo   # (B,) ~ Uniform
+    apply = (torch.rand(B, device=dev, dtype=dt) < prob).to(dt)    # (B,) Bernoulli
+    scale = apply * scale + (1.0 - apply) * 1.0                    # no-op when not applied
+
+    p0 = coords[:, 10]  # (B, 3) — last observed point, the reference
+    coords_aug = p0[:, None] + scale[:, None, None] * (coords - p0[:, None])
+    labels_aug = p0 + scale[:, None] * (labels - p0)
+    return coords_aug, labels_aug
+
+
 class MosquitoDataset(Dataset):
     def __init__(self, coords: np.ndarray, labels: np.ndarray = None, augment: bool = False):
         self.coords  = coords

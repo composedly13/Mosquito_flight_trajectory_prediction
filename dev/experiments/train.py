@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,7 +9,10 @@ from tqdm import tqdm
 import hashlib
 
 from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP
-from dataset import load_all, MosquitoDataset, augment_batch_gpu, augment_batch_gpu_yaw
+from dataset import (
+    load_all, MosquitoDataset,
+    augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
+)
 from model import CandidateSelector, soft_labels, selector_predict
 from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 
@@ -72,6 +76,13 @@ def train_fold(
                 coords_b, true = augment_batch_gpu(coords_b, true)
             elif AUG_MODE == 'yaw':
                 coords_b, true = augment_batch_gpu_yaw(coords_b, true)
+            elif AUG_MODE == 'yaw_speed':
+                coords_b, true = augment_batch_gpu_yaw(coords_b, true)
+                coords_b, true = augment_speed_scale_gpu(
+                    coords_b, true,
+                    scale_range=SPEED_SCALE_RANGE,
+                    prob=SPEED_SCALE_PROB,
+                )
 
             cands  = make_candidates_gpu(coords_b)
             seq_f  = make_seq_features_gpu(coords_b)
@@ -130,13 +141,15 @@ def train_fold(
     return best_hit, best_state, val_mask, best_preds
 
 
-def train():
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+def train(seed: int = SEED):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}")
+    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}")
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Each seed gets its own subdirectory so multi-seed runs don't overwrite each other.
+    out_dir = OUTPUT_DIR / f"seed{seed}"
+    out_dir.mkdir(parents=True, exist_ok=True)
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
 
     fold_results = []
@@ -170,10 +183,14 @@ def train():
 
     # Save selector models
     for i, state in enumerate(all_states):
-        torch.save(state, OUTPUT_DIR / f"selector_fold{i}.pt")
+        torch.save(state, out_dir / f"selector_fold{i}.pt")
 
-    print(f"\nModels saved to {OUTPUT_DIR}/")
+    print(f"\nModels saved to {out_dir}/")
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=SEED,
+                        help="Random seed (default: config.SEED). Use different seeds for ensemble.")
+    args = parser.parse_args()
+    train(seed=args.seed)

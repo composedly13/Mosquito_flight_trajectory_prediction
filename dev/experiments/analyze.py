@@ -1,8 +1,8 @@
 """
 Post-hoc diagnostics using saved fold models.
-Run: python dev/experiments/analyze.py
+Run: python dev/experiments/analyze.py [--seed 42]
 """
-import sys, hashlib
+import sys, hashlib, argparse
 import numpy as np
 import torch
 from pathlib import Path
@@ -229,9 +229,9 @@ def oracle_selector_decomposition(
     print(f"  Oracle candidate rank statistics:")
     print(f"    mean={oracle_rank.mean():.1f}  median={np.median(oracle_rank):.0f}"
           f"  p75={np.percentile(oracle_rank, 75):.0f}  p90={np.percentile(oracle_rank, 90):.0f}")
-    for k in [1, 3, 5, 7]:
+    for k in [1, 3, 5, 7, 10]:
         rate = float(np.mean(oracle_rank < k))
-        print(f"  Oracle in Top-{k}: {rate:.4f}")
+        print(f"  Oracle in Top-{k:>2}: {rate:.4f}")
 
     # Softmax weights (numerically stable)
     logits_shifted = all_logits - all_logits.max(axis=1, keepdims=True)
@@ -258,9 +258,10 @@ def oracle_selector_decomposition(
         if n == 0:
             print(f"  {name}: 0 샘플")
             continue
-        h1 = float(np.mean(np.linalg.norm(topk_pred(mask, 1) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
-        h5 = float(np.mean(np.linalg.norm(topk_pred(mask, 5) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
-        print(f"  {name}: {n:5d}샘플 ({mask.mean():.1%}) | Top-1 hit={h1:.4f}  Top-5 hit={h5:.4f}")
+        h1  = float(np.mean(np.linalg.norm(topk_pred(mask,  1) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
+        h5  = float(np.mean(np.linalg.norm(topk_pred(mask,  5) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
+        h10 = float(np.mean(np.linalg.norm(topk_pred(mask, 10) - labels[mask], axis=-1) <= R_HIT_THRESHOLD))
+        print(f"  {name}: {n:5d}샘플 ({mask.mean():.1%}) | Top-1={h1:.4f}  Top-5={h5:.4f}  Top-10={h10:.4f}")
 
     print()
     print("  해석 가이드:")
@@ -285,21 +286,24 @@ def oracle_selector_decomposition(
         print("  → A그룹: Top-1 ≈ Top-5 → 가중 평균 영향 미미")
 
 
-def analyze():
+def analyze(seed: int = SEED):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
 
-    # Load saved fold models
+    # Models are saved in per-seed subdirectories by train.py
+    model_dir = OUTPUT_DIR / f"seed{seed}"
+    print(f"모델 디렉토리: {model_dir}  (seed={seed})")
+
     models = {}
     for fold in range(N_FOLDS):
-        path = OUTPUT_DIR / f"selector_fold{fold}.pt"
+        path = model_dir / f"selector_fold{fold}.pt"
         if path.exists():
             m = CandidateSelector().to(device)
             m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
             m.eval()
             models[fold] = m
     if not models:
-        print("저장된 모델 없음. train.py 먼저 실행.")
+        print("저장된 모델 없음. python train.py --seed {seed} 먼저 실행.")
         return
     print(f"모델 {len(models)}개 로드 완료\n")
 
@@ -404,4 +408,8 @@ def analyze():
 
 
 if __name__ == "__main__":
-    analyze()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=SEED,
+                        help="Which seed's models to analyze (default: config.SEED)")
+    args = parser.parse_args()
+    analyze(seed=args.seed)

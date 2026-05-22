@@ -17,9 +17,12 @@ LR          = 3e-4
 WEIGHT_DECAY = 1e-4
 PATIENCE    = 40        # early stopping
 
-# Augmentation: 'so3' (random 3D rotation) | 'yaw' (z-axis rotation only) | 'none'
-# 'yaw' is safer when z=UP has physical meaning (LiDAR coordinate frame)
-AUG_MODE    = 'yaw'
+# Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
+# 'yaw'       : z-axis rotation only (safe for LiDAR z=UP frame)
+# 'yaw_speed' : yaw + speed-scale (scale displacements around last point p0)
+AUG_MODE          = 'yaw_speed'
+SPEED_SCALE_RANGE = (0.85, 1.15)   # Uniform scale range; first experiment
+SPEED_SCALE_PROB  = 0.5            # fraction of samples that get scaled
 
 # Selector Model (Transformer)
 # d256 run result: CV 0.6365 (worse than d128 0.6410) — likely overfitting on 8k samples

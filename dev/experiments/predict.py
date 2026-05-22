@@ -1,6 +1,10 @@
 """
-Inference: K-Fold selector ensemble + boundary MLP correction -> submission CSV.
+Inference: K-Fold selector ensemble + optional multi-seed ensemble -> submission CSV.
+
+Single seed:   python predict.py --seed 42
+Multi-seed:    python predict.py --seeds 42 123 777
 """
+import argparse
 import numpy as np
 import pandas as pd
 import torch
@@ -16,16 +20,20 @@ from candidates import make_candidates_gpu, make_seq_features_gpu, make_cand_fea
 from boundary import BoundaryMLP, apply_boundary
 
 
-def load_selectors(device: torch.device) -> list:
+def load_selectors(seeds: list, device: torch.device) -> list:
+    """Load all fold models for the given seeds.  seeds=[42] for single-seed inference."""
     models = []
-    for fold in range(N_FOLDS):
-        path = OUTPUT_DIR / f"selector_fold{fold}.pt"
-        if not path.exists():
-            raise FileNotFoundError(f"Missing: {path}")
-        m = CandidateSelector().to(device)
-        m.load_state_dict(torch.load(path, map_location=device))
-        m.eval()
-        models.append(m)
+    for seed in seeds:
+        seed_dir = OUTPUT_DIR / f"seed{seed}"
+        for fold in range(N_FOLDS):
+            path = seed_dir / f"selector_fold{fold}.pt"
+            if not path.exists():
+                raise FileNotFoundError(f"Missing: {path}  (run: python train.py --seed {seed})")
+            m = CandidateSelector().to(device)
+            m.load_state_dict(torch.load(path, map_location=device))
+            m.eval()
+            models.append(m)
+    print(f"  {len(models)} models loaded ({len(seeds)} seeds × {N_FOLDS} folds)")
     return models
 
 
@@ -52,12 +60,14 @@ def predict_batch(
     return pred.cpu().numpy()
 
 
-def predict():
-    torch.manual_seed(SEED)
+def predict(seeds: list = None):
+    if seeds is None:
+        seeds = [SEED]
+    torch.manual_seed(seeds[0])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(f"Device: {device}  |  Seeds: {seeds}")
 
-    selectors = load_selectors(device)
+    selectors = load_selectors(seeds, device)
     boundary  = load_boundary(device)
 
     ids, coords, _ = load_all(TEST_DIR)
@@ -106,4 +116,19 @@ def predict():
 
 
 if __name__ == "__main__":
-    predict()
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--seed",  type=int, default=None,
+                       help="Single seed to use (default: config.SEED)")
+    group.add_argument("--seeds", type=int, nargs="+", default=None,
+                       help="Multiple seeds for ensemble, e.g. --seeds 42 123 777")
+    args = parser.parse_args()
+
+    if args.seeds:
+        seeds = args.seeds
+    elif args.seed is not None:
+        seeds = [args.seed]
+    else:
+        seeds = [SEED]
+
+    predict(seeds=seeds)
