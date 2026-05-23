@@ -116,7 +116,7 @@ MISS 케이스는 급격한 방향 전환이 원인 — 속도(+20%), 가속도(
 ### 손실 함수
 
 ```
-L = L_softCE + 0.25 × L_pairwise + 0.10 × L_listMLE
+L = L_softCE + 0.25 × L_pairwise + 0.05 × L_listMLE
 
 L_softCE   : soft label cross-entropy (거리 기반 타겟 분포, temp=0.005)
 L_pairwise : good candidate > bad candidate 랭킹 손실 (margin=0.12)
@@ -303,6 +303,12 @@ python dev/experiments/predict.py --seeds 42 123 777
 | **G2 seed 777** | 50★ | **64.87%** | 77.02% | **84.2%** | **64.87%** | **현재 최고 단일 seed** |
 | 3-seed 앙상블 (42+123+777) | 50★ | — | 77.02% | 84.0% | 64.68% | ❌ seed123 역효과 −0.07pp |
 | **2-seed 앙상블 (42+777)** | 50★ | — | 77.02% | **84.2%** | **64.84%** | seed42 대비 +0.09pp, seed777 대비 −0.03pp — **제출 권장** |
+| Phase 5: RegMLP entropy blend (β grid) | 50★ | — | 77.02% | 84.2% | 0.0681† | ❌ RegMLP 단독 실패 — β=0.0(selector-only) 최적 → 2-seed LB **0.6716** |
+| Phase 6 1차: 3-seed 42+123+777 (config 혼재) | 50/50★ | — | — | — | 0.6493‡ | ❌ LB 0.669 — seed42=Smart50, seed123/777=original 혼재 |
+| **Phase 6 2차: 3-seed 42+123+777 (원래 50, LML=0.05, 일관)** | 50 | — | 74.89% | 86.5% | **0.6479** | 기준선 0.6489 미달 (−0.05pp) → seed42 단독과 사실상 동등 |
+
+> † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
+> ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.
 
 ### Selector Error Decomposition
 
@@ -1347,3 +1353,124 @@ python dev/experiments/predict.py --seeds 42 123 777   # 제출 파일 생성
 | 직접 회귀 MLP | 11개 시점 좌표 → 직접 (x,y,z) 예측 |
 | 혼합 기준 | selector logit entropy 높을 때(불확실) → 회귀 비중 증가 |
 | 기대 효과 | C그룹 23% 중 일부 포착 → +0.5~1.5pp |
+
+---
+
+### 2026-05-23 (1)
+
+**[Phase 5: RegMLP Entropy Blend — 완전 실패]**
+
+**구현**
+- `regression.py`: 11개 시점 좌표 → 직접 (x,y,z) 예측 MLP (BoundaryMLP 구조 재활용)
+- `predict.py`: `--beta` 인자 추가, entropy blend 공식: `pred = β·reg + (1−β)·selector`
+- 아이디어: selector logit entropy 높을 때(불확실) → 회귀 비중 증가
+
+**결과**
+
+| 지표 | 값 |
+|---|---|
+| Regression OOF (단독) | **0.0681** — 완전 실패 (random 수준) |
+| Entropy H: mean / p25 / p75 / p95 | 0.991 / 0.996 / 1.000 / 1.000 |
+
+| β | Blend OOF | vs Selector |
+|---:|---:|---:|
+| 0.0 | 0.6484 | +0.00pp |
+| 0.2 | 0.5183 | −12.78pp |
+| 0.4 | 0.3091 | −33.70pp |
+| 1.0 | 0.0688 | −57.73pp |
+
+**결론: Phase 5 완전 실패**
+- RegMLP가 C그룹 케이스조차 학습 불가 — 직접 회귀 방식 구조적 한계
+- Entropy 분포: mean=0.991 → selector가 거의 항상 고 불확실 → entropy로 두 모드를 구분할 수 없음
+- β=0.0 (순수 selector)이 유일한 최적값 → regression blend 포기
+- **부산물**: seeds 42+777 (Smart50+LML=0.10) selector-only temp=2.0 → LB **0.6716** (기존 최고 동타)
+
+---
+
+### 2026-05-23 (2)
+
+**[Phase 6: original 50-cand 복원 및 일관 3-seed 재실험]**
+
+**목표**
+Smart50+LML=0.10 → original 50-cand+LML=0.05 복원 후 3-seed 앙상블 OOF > 0.6489 달성 시 제출.
+
+**설정 변경**
+
+| 항목 | 변경 전 | 변경 후 |
+|---|---|---|
+| `candidates.py` | Smart 50-cand (jerk_xxl, turn_p070~p080 등) | 원래 50-cand (git checkout a59715f) |
+| `LISTMLE_WEIGHT` | 0.10 | 0.05 |
+| `AUG_MODE` | yaw | yaw (유지) |
+
+**1차 실험 — config 불일치 발견 (LB 0.669)**
+
+seeds 123+777을 original 50-cand+LML=0.05로 새로 학습, seed42는 기존 모델 재사용:
+
+| seed | OOF |
+|---:|---:|
+| 42 (기존 Smart50 모델) | 0.6461 (학습시점 0.6489 대비 −28bp) |
+| 123 (신규 original) | 0.6484 |
+| 777 (신규 original) | 0.6464 |
+| **3-seed OOF** | **0.6493** |
+
+제출 후 LB=**0.669** — 기대치(≥0.6716) 대폭 하락.
+
+**원인 분석**
+- `outputs/seed42/selector_fold0.pt` 수정 시각: 2026-05-22 22:36 (Smart50 실험 시점)
+- seed42 = Smart50+LML=0.10으로 재학습됨, seed123/777 = original 50-cand+LML=0.05 — 혼재 앙상블
+- 서로 다른 후보 집합으로 학습된 모델을 같은 후보로 inference → feature 분포 불일치
+
+**2차 실험 — seed42 재학습, 3-seed 일관 구성**
+
+설정: original 50-cand + LML=0.05 + yaw (3 seeds 동일)
+
+| Fold | seed42 | seed123 | seed777 |
+|---:|---:|---:|---:|
+| 1 | 0.6609 | 0.6594 | 0.6574 |
+| 2 | 0.6439 | 0.6448 | 0.6424 |
+| 3 | 0.6497 | 0.6481 | 0.6445 |
+| 4 | 0.6495 | 0.6505 | 0.6480 |
+| 5 | 0.6381 | 0.6391 | 0.6396 |
+| **OOF** | **0.6484** | **0.6484** | **0.6464** |
+
+**Multi-seed 분석 결과 (analyze.py --seeds 42 123 777)**
+
+| 지표 | 값 |
+|---|---|
+| Single-seed OOF (seed=42) | 0.6484 |
+| **Multi-seed OOF (3 seeds)** | **0.6479** (−0.05pp) |
+| Oracle ceiling | 0.7489 |
+| Multi-seed efficiency | 86.5% |
+| 최적 temperature | **1.0** (Smart50 시절 2.0과 달리 confidence 회복) |
+
+Oracle Error Decomposition (3-seed):
+
+| 그룹 | 비율 | Top-10 hit |
+|---|---:|---:|
+| A: oracle ∩ top-5 | 32.3% | 0.8740 |
+| B: oracle ∩ top-5 밖 | 42.6% | 0.8594 |
+| C: oracle 없음 | 25.1% | 0.0004 |
+
+**결론: 3-seed 앙상블 효과 없음**
+- 기준선 0.6489 미달 (0.6479 < 0.6489) → criterion 불통과
+- seed777 OOF(0.6464)가 seed42(0.6484) 대비 낮아 평균이 끌림
+- seeds 123/777 추가 시 분산 감소 효과가 평균 하락을 상쇄하지 못함
+
+**현재 한계 정리**
+
+| 항목 | 값 | 한계 |
+|---|---|---|
+| Oracle ceiling | 74.89% | C그룹 25.1% 고착 |
+| Selector OOF | 64.84% | B그룹 42.6% 병목 |
+| Multi-seed | 3-seed < single | seed 간 diversity 부족 |
+| RegMLP | OOF 0.0681 | 직접 회귀 구조적 실패 |
+| **best LB** | **0.6716** | **seed42 단독 or 2-seed (42+777), original 50-cand** |
+
+**남은 방향 (다음 세션)**
+
+| 방향 | 내용 | 기대 효과 |
+|---|---|---|
+| 후보 재설계 | Smart50 교훈 반영 — 극단 후보를 더 적게, 중간 범위를 더 촘촘히 | Oracle ↑, B-group 유지 |
+| 아키텍처 | GRU + Cross-Attention 혼합, 또는 deeper head | efficiency ↑ |
+| Ranking loss | ListMLE + Margin Ranking 결합, hard negative mining | oracle rank ↓ |
+| 후처리 앙상블 | 서로 다른 config 모델 혼합 (orig+Smart50) | 분산 감소 |
