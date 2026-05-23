@@ -46,6 +46,11 @@ SOFT_TEMP       = 0.005   # soft-label temperature
 PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight (0.5 시도 → fold5 붕괴, 유지)
 # LISTMLE_WEIGHT grid: 0.0(baseline A) → 0.05(B) → 0.1(C) → 0.2(D)
 LISTMLE_WEIGHT  = 0.05    # 원래 50-cand + LML=0.05 (multi-seed run: 42+123+777)
+# Oracle Margin Loss weight: oracle logit이 top-5 기준보다 margin=0.15 높도록 강제
+# analyze.py 섹션4에서 'Oracle in Top-5' 수치가 오르는지 확인하며 조절
+# focal weight(2.0)는 oracle rank 악화 확인 → margin loss로 교체
+# 시도 범위: 0.05, 0.10, 0.20 (너무 크면 CE와 충돌, 작으면 효과 없음)
+B_GROUP_WEIGHT  = 0.10
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일

@@ -252,17 +252,17 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **원래 50개** (original 50-cand — 실험 B 확정 config, Smart50 실험 후 Phase 6 복원) |
+| Candidates | **52개** (original 50-cand + latency_s075/s080 추가 — Phase 7 C-group 대응) |
 | Augmentation | **yaw-only** (speed-scale 0.85~1.15 실험 결과 효과 없음 → 복귀) |
 | Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
 | Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
-| Loss | **CE + PW×0.25 + LML×0.05** (실험 B 최적 config) |
-| Prediction | **Top-10** weighted average, temp=1.0 |
+| Loss | **CE + PW×0.25 + LML×0.05 + OracleMargin×0.10** |
+| Prediction | **Top-10** weighted average, temp=2.0 (52-cand 최적) |
 | Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
 | TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **64.84%** (seed42, original 50-cand + LML=0.05) |
-| Oracle ceiling | **74.89%** (original 50-cand 기준) |
-| Selector efficiency | **86.6%** (목표: eff ≥ 93.5% → OOF≥0.677 → LB≈0.702) |
+| CV R-Hit | **65.10%** (seed42, 52-cand + OracleMargin 학습 전 기준: 65.10% OOF) |
+| Oracle ceiling | **75.41%** (52-cand 기준, original 대비 +0.52pp) |
+| Selector efficiency | **86.3%** (목표: eff ≥ 93.5% → OOF≥0.677 → LB≈0.702) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
@@ -306,6 +306,9 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Phase 5: RegMLP entropy blend (β grid) | 50★ | — | 77.02% | 84.2% | 0.0681† | ❌ RegMLP 단독 실패 — β=0.0(selector-only) 최적 → 2-seed LB **0.6716** |
 | Phase 6 1차: 3-seed 42+123+777 (config 혼재) | 50/50★ | — | — | — | 0.6493‡ | ❌ LB 0.669 — seed42=Smart50, seed123/777=original 혼재 |
 | **Phase 6 2차: 3-seed 42+123+777 (원래 50, LML=0.05, 일관)** | 50 | — | 74.89% | 86.5% | **0.6479** | 기준선 0.6489 미달 (−0.05pp) → seed42 단독과 사실상 동등 |
+| **Phase 7-1: 52-cand (latency_s075/080 추가)** | 52 | — | **75.41%** | 86.3% | **0.6510** | Oracle +0.52pp, OOF +0.26pp — C-group 일부 커버 |
+| Phase 7-2: 52-cand + B-group focal weight×2.0 | 52 | — | 75.41% | — | — | ❌ B-group 42.6%→46.6%, oracle rank 13.3→16.4 악화 |
+| **Phase 7 제출: seed42, temp=2.0** | 52 | — | 75.41% | 86.3% | 0.6510 | **LB 0.6712** (focal 실패 후 selector-only 제출) |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.
@@ -324,6 +327,8 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 E: yaw+speed-scale 0.85~1.15 | 13.0 | 46.7% | 33.2% | 41.7% | 25.1% | ❌ 변화 없음 |
 | 실험 G: Smart 50-cand (LML=0.05) | 15.7 | 40.0% | 29.0% | **48.0%** | **23.0%** | Oracle↑ C↓ 좋음, 그러나 B-group↑ 나쁨 |
 | 실험 G2: Smart 50 + LML=0.10 | **13.2** | 43.6% | 30.6% | 46.4% | 23.0% | rank 개선 但 OOF +0.02pp, 단일 seed 상한 도달 |
+| Phase 7-1: 52-cand (original + latency_s075/080) | 13.3 | 39.2% | 32.1% | **42.6%** | **22.6%** | C-group 25.1%→22.6% (-2.5pp), B-group 최초 진입 병목 |
+| Phase 7-2: 52-cand + focal×2.0 (B-group) | **16.4** | — | — | 46.6% | — | ❌ oracle rank 악화 — 불안정한 hard mining |
 
 ---
 
@@ -1474,3 +1479,162 @@ Oracle Error Decomposition (3-seed):
 | 아키텍처 | GRU + Cross-Attention 혼합, 또는 deeper head | efficiency ↑ |
 | Ranking loss | ListMLE + Margin Ranking 결합, hard negative mining | oracle rank ↓ |
 | 후처리 앙상블 | 서로 다른 config 모델 혼합 (orig+Smart50) | 분산 감소 |
+
+---
+
+### 2026-05-24
+
+**[Phase 7: 52-cand + B-group 개선 시도 → LB 0.6712]**
+
+**배경**
+
+Phase 6에서 3-seed 앙상블이 단일 seed(0.6484) 대비 −0.05pp로 실패한 이후, C-group(25.1%)과 B-group(42.6%) 두 병목을 직접 타격하는 접근으로 전환.
+
+**작업 0 — Smart50 RegMLP 오염 제거**
+
+`outputs/seed42/`에 Phase 5 Smart50+LML=0.10 시절의 RegMLP 모델(`regmlp_fold*.pt`, `regmlp_oof.npy`)이 잔존.  
+predict.py가 자동 감지 후 entropy blend 제출(`submission_blend.csv`)을 생성할 위험 → `regmlp_smart50_backup/`으로 격리.
+
+**작업 1 — C-group 대응: latency_s075/s080 추가 (52-cand)**
+
+analyze.py §6(C-group analysis) 결과에서 C-group nearest candidate 상위:
+
+| rank | 후보 | 비율 |
+|---:|---|---:|
+| 1 | latency_s085 | 21.8% |
+| 2 | latency_s092 | 18.3% |
+| … | | |
+
+latency_s085가 C-group의 가장 가까운 후보 1위(21.8%) → s085보다 더 강한 time_scale(0.75, 0.80)을 추가하면 일부 C-group 케이스 포획 가능.
+
+`candidates.py` 변경:
+```python
+# 기존: latency_s085, latency_s092, latency_s100, ...
+# 추가: latency_s075(time_scale=0.75), latency_s080(time_scale=0.80)
+CandidateSpec("latency_s075", 1.98, 0.96, -0.08, time_scale=0.75),
+CandidateSpec("latency_s080", 1.98, 0.96, -0.08, time_scale=0.80),
+# N_CANDIDATES: 50 → 52
+```
+
+seed42 재학습 결과:
+
+| 지표 | original 50-cand | 52-cand |
+|---|---:|---:|
+| OOF | 0.6484 | **0.6510** (+0.26pp) |
+| Oracle ceiling | 74.89% | **75.41%** (+0.52pp) |
+| C-group | 25.1% | **22.6%** (−2.5pp) ✅ |
+| B-group | 42.6% | 42.6% (미변화) |
+| Oracle in Top-5 | 47.1% | 39.2% (↓) |
+| Oracle rank mean | 13.1 | 13.3 (거의 동일) |
+| 최적 temperature | 1.0 | **2.0** (52-cand 환경 재확인) |
+
+C-group 2.5pp 개선, oracle ceiling +0.52pp — 의미 있는 개선.  
+B-group은 여전히 42.6% 고착, Oracle in Top-5가 39.2%로 하락 → B-group 병목 해소 필요.
+
+**작업 2 — B-group focal loss 실험: 실패**
+
+아이디어: B-group 샘플(oracle이 후보군에 있으나 top-5 밖) 에 2× 손실 가중치를 주어 하드 케이스 집중.
+
+구현: 배치 내 `oracle_dist ≤ R_HIT_THRESHOLD` 이면서 `oracle_rank > 5`인 샘플을 `logits.detach()`로 실시간 판별, 해당 샘플 loss에 2× 가중치.
+
+결과:
+
+| 지표 | 52-cand (base) | focal×2.0 |
+|---|---:|---:|
+| B-group | 42.6% | **46.6%** (❌ +4pp 악화) |
+| Oracle rank mean | 13.3 | **16.4** (❌ 3.1pp 악화) |
+
+**실패 원인 분석**: 학습 초기에는 oracle이 거의 모든 B-group 샘플에서 rank 20+ → 사실상 전 샘플이 focal 대상 → 균일 2× 스케일링과 동일한 효과 발생. 학습 불안정 → oracle rank 역행.
+
+**작업 3 — Oracle Margin Loss로 교체**
+
+focal 방식을 폐기하고, oracle logit을 k번째 높은 logit보다 직접 높이도록 강제하는 margin loss로 교체.
+
+```python
+def oracle_margin_loss(logits, cands, true, k=5, margin=0.15):
+    """oracle logit이 top-5 기준선(k=5번째 logit)보다 margin=0.15 높아야 함."""
+    dist        = torch.norm(cands - true.unsqueeze(1), dim=-1)
+    oracle_idx  = dist.argmin(dim=-1)
+    oracle_score = logits.gather(1, oracle_idx.unsqueeze(1))
+    kth_score    = logits.kthvalue(logits.size(1) - k + 1, dim=1).values.unsqueeze(1)
+    loss = F.relu(kth_score - oracle_score + margin)
+    # C-group(oracle 없음)은 loss=0
+    is_hit = (oracle_dist <= R_HIT_THRESHOLD).float().unsqueeze(1)
+    return (loss * is_hit).mean()
+```
+
+`config.py`: `B_GROUP_WEIGHT = 0.10`  
+`train.py` loss 구성: `CE + PW×0.25 + LML×0.05 + OracleMargin×0.10`
+
+→ 아직 재학습 미완료, 다음 실험으로 예약.
+
+**Phase 7 제출 결과**
+
+52-cand selector-only (focal 실패, oracle margin 학습 전) 상태에서 제출:
+
+```bash
+python dev/experiments/predict.py --seed 42 --temp 2.0
+# submission.csv → 제출
+```
+
+| 항목 | 값 |
+|---|---|
+| Seeds | 42 단독 |
+| Temperature | 2.0 (52-cand analyze.py 최적값) |
+| OOF | 0.6510 |
+| **LB** | **0.6712** |
+
+현재까지 LB 순위: 0.6712 (≥ Phase 6 best 0.6716 대비 −0.04pp; 기존 최고 동등권 근접).
+
+---
+
+### 다음 실험 계획
+
+**Phase 8 — Oracle Margin Loss 검증**
+
+```bash
+# 재학습 (oracle_margin_loss, B_GROUP_WEIGHT=0.10)
+python dev/experiments/train.py --seed 42
+# 진단
+python dev/experiments/analyze.py --seed 42
+# 기대 지표
+#   Oracle in Top-5: 39.2% → ≥ 50%
+#   Oracle rank mean: 13.3 → ≤ 10
+#   B-group: 42.6% → ≤ 38%
+# 통과 시 제출
+python dev/experiments/predict.py --seed 42 --temp 2.0
+```
+
+| 체크포인트 | 기준 | 다음 행동 |
+|---|---|---|
+| Oracle in Top-5 ≥ 50% | ✅ 통과 | seed777 재학습 → 2-seed 앙상블 |
+| Oracle in Top-5 < 50% | ❌ 실패 | `B_GROUP_WEIGHT` 조정 (0.05 또는 0.20) 또는 `margin` 조정 |
+| OOF ≥ 0.655 | ✅ 통과 | 제출 시도 |
+| OOF < 0.651 | ❌ 퇴보 | focal failure 재진단 |
+
+**Phase 9 — 2-seed 앙상블 (Phase 8 통과 시)**
+
+```bash
+python dev/experiments/train.py --seed 777
+python dev/experiments/analyze.py --seeds 42 777
+python dev/experiments/predict.py --seeds 42 777 --temp 2.0
+```
+
+기대: OOF 분산 감소 → LB ≥ 0.675
+
+**Phase 10 — Oracle ceiling 추가 개선**
+
+| 방향 | 내용 | 기대 |
+|---|---|---|
+| Latency 계열 세분화 | s060~s070 추가 (강한 latency) | C-group −3pp |
+| Turn 세분화 | |perp| 0.10~0.15 구간 촘촘히 | B-group C-group 공략 |
+| jerk 다양화 | 법선/접선 복합 방향 | C-group 특이 패턴 |
+
+**단계별 목표**
+
+| 단계 | 목표 OOF | 목표 LB | 조건 |
+|---|---:|---:|---|
+| Phase 8 (oracle margin) | ≥ 0.655 | ≥ 0.675 | Oracle in Top-5 ≥ 50% |
+| Phase 9 (2-seed) | ≥ 0.660 | ≥ 0.680 | seed42 OOF ≥ 0.655 |
+| Phase 10 (oracle 개선) | ≥ 0.665 | ≥ 0.690 | eff ≥ 88% |
+| 최종 목표 | ≥ 0.677 | **≥ 0.710** | eff ≥ 93.5% |

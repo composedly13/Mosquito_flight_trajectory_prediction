@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
@@ -39,6 +39,32 @@ def listmle_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) 
     dist       = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
     oracle_idx = dist.argmin(dim=-1)                             # (B,)
     return -F.log_softmax(logits, dim=-1).gather(1, oracle_idx.unsqueeze(1)).mean()
+
+
+def oracle_margin_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor,
+                       k: int = 5, margin: float = 0.15) -> torch.Tensor:
+    """
+    Oracle Top-K Margin Loss:
+    oracle 후보의 logit이 k번째 높은 logit보다 margin만큼 높아야 한다.
+    → oracle이 top-k 안에 들어오도록 직접 강제.
+    oracle이 없는 샘플(C-group)은 loss=0.
+
+    k=5: oracle을 top-5로 끌어올림 (현재 Oracle in Top-5 = 39.2% → 개선 목표)
+    margin=0.15: 충분한 마진 확보
+    """
+    dist        = torch.norm(cands - true.unsqueeze(1), dim=-1)   # (B, C)
+    oracle_dist = dist.min(dim=-1).values                          # (B,)
+    oracle_idx  = dist.argmin(dim=-1)                              # (B,)
+
+    oracle_score = logits.gather(1, oracle_idx.unsqueeze(1))       # (B, 1)
+    # k번째로 높은 logit: oracle이 이것보다 높아야 top-k에 들어감
+    kth_score    = logits.kthvalue(logits.size(1) - k + 1, dim=1).values.unsqueeze(1)  # (B, 1)
+
+    loss = F.relu(kth_score - oracle_score + margin)               # (B, 1)
+
+    # C-group(oracle 없음)은 학습에서 제외
+    is_hit = (oracle_dist <= R_HIT_THRESHOLD).float().unsqueeze(1) # (B, 1)
+    return (loss * is_hit).mean()
 
 
 def train_fold(
@@ -96,6 +122,9 @@ def train_fold(
             loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
             if LISTMLE_WEIGHT > 0:
                 loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
+            if B_GROUP_WEIGHT > 0:
+                # oracle margin: oracle logit이 top-5 기준선보다 높도록 직접 강제
+                loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
 
             optimizer.zero_grad()
             loss.backward()

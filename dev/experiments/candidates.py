@@ -54,6 +54,9 @@ CANDIDATES = [
     CandidateSpec("jerk_small_neg",    1.98,  0.80, -0.05, jerk=-0.08),
 
     # Latency family
+    # latency_s085가 C-group nearest 21.8% → s080/s075로 더 강한 보정 커버
+    CandidateSpec("latency_s075",      1.98,  0.96, -0.08, time_scale=0.75),
+    CandidateSpec("latency_s080",      1.98,  0.96, -0.08, time_scale=0.80),
     CandidateSpec("latency_s085",      1.98,  0.96, -0.08, time_scale=0.85),
     CandidateSpec("latency_s092",      1.98,  0.96, -0.08, time_scale=0.92),
     CandidateSpec("latency_l108",      1.98,  0.96, -0.08, time_scale=1.08),
@@ -93,9 +96,9 @@ CANDIDATES = [
     CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
 
 ]
-# 60-cand 실험(2026-05-22)에서 jerk_xxl~turn_n100 10개 추가했으나
-# oracle +3.4pp vs efficiency -4.9pp → OOF 63.75% (50-cand 64.61% 대비 후퇴)
-# clean baseline은 50개 유지. 추후 ranking 개선 후 재시도.
+# 60-cand 실험(2026-05-22): jerk_xxl~turn_n100 10개 추가 → oracle +3.4pp, efficiency -4.9pp → 실패
+# 52-cand (2026-05-24): latency_s075/s080 추가 (C-group latency_s085 nearest 21.8% 대응)
+#   oracle 소폭 상승 기대, efficiency 영향 미미 (latency 후보는 구분 쉬움)
 
 N_CANDIDATES = len(CANDIDATES)
 
