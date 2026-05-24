@@ -1,10 +1,16 @@
 """
 Inference: K-Fold selector ensemble + optional multi-seed ensemble -> submission CSV.
-Optional entropy-based regression blend when RegMLP models are available.
+Optional entropy-based regression blend.
 
-Single seed:   python predict.py --seed 42
-Multi-seed:    python predict.py --seeds 42 777
-With blend:    python predict.py --seeds 42 777  --beta 1.0
+Single seed:      python predict.py --seed 42
+Multi-seed:       python predict.py --seeds 42 777
+Reg2 blend:       python predict.py --seeds 42 777 --reg2 --beta 1.0
+RegMLP blend:     python predict.py --seeds 42 777 --beta 1.0   (legacy)
+
+Blend logic (--reg2 preferred):
+  α = clip(1 - beta × H_norm, 0, 1)   H_norm = normalised entropy ∈ [0,1]
+  pred = α × selector + (1-α) × regressor
+  H≈0 (confident) → trust selector;  H≈1 (uncertain) → lean on regressor
 """
 import argparse
 import numpy as np
@@ -20,7 +26,11 @@ from dataset import load_all
 from model import CandidateSelector, selector_predict
 from candidates import make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 from boundary import BoundaryMLP, apply_boundary
-from regression import load_reg_models, predict_reg_batch, entropy_blend
+from regression import (
+    load_reg_models, predict_reg_batch,
+    load_reg2_models, predict_reg2_batch,
+    entropy_blend,
+)
 
 
 def load_selectors(seeds: list, device: torch.device) -> list:
@@ -50,7 +60,7 @@ def load_boundary(device: torch.device):
     return m
 
 
-def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
+def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: bool = False):
     if seeds is None:
         seeds = [SEED]
     torch.manual_seed(seeds[0])
@@ -60,10 +70,21 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
     selectors = load_selectors(seeds, device)
     boundary  = load_boundary(device)
 
-    # Load regression models if available (for entropy-blend submission)
-    print("  RegMLP 모델 확인...")
-    reg_seed_models = load_reg_models(seeds, device)
-    reg_models_flat = [m for fold_list in reg_seed_models.values() for m in fold_list]
+    # Regressor loading: prefer reg2 (TransformerRegressor), fallback to RegMLP
+    reg_models_flat = []
+    reg2_label = ""
+    if use_reg2:
+        print("  TransformerRegressor(reg2) 모델 확인...")
+        reg2_seed_models = load_reg2_models(seeds, device)
+        reg_models_flat  = [m for fl in reg2_seed_models.values() for m in fl]
+        reg2_label = "reg2"
+    if not reg_models_flat:
+        # Fallback: legacy RegMLP
+        print("  RegMLP 모델 확인 (fallback)...")
+        reg_seed_models = load_reg_models(seeds, device)
+        reg_models_flat = [m for fl in reg_seed_models.values() for m in fl]
+        reg2_label = "regmlp"
+
     use_blend = len(reg_models_flat) > 0
 
     ids, coords, _ = load_all(TEST_DIR)
@@ -80,9 +101,9 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
         c    = torch.tensor(c_np).to(device)
 
         with torch.no_grad():
-            cands_t = make_candidates_gpu(c)
-            seq_t   = make_seq_features_gpu(c)
-            cand_t  = make_cand_features_gpu(c, cands_t)
+            cands_t    = make_candidates_gpu(c)
+            seq_t      = make_seq_features_gpu(c)
+            cand_t     = make_cand_features_gpu(c, cands_t)
             avg_logits = sum(m(seq_t, cand_t) for m in selectors) / len(selectors)
             pred       = selector_predict(avg_logits, cands_t, topk=TOPK, temp=temp)
 
@@ -90,7 +111,10 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
         all_logits.append(avg_logits.cpu().numpy())
 
         if use_blend:
-            reg_pred = predict_reg_batch(reg_models_flat, c)
+            if reg2_label == "reg2":
+                reg_pred = predict_reg2_batch(reg_models_flat, c)
+            else:
+                reg_pred = predict_reg_batch(reg_models_flat, c)
             all_reg.append(reg_pred.cpu().numpy())
 
     all_preds  = np.concatenate(all_preds,  axis=0)   # (N, 3)
@@ -109,14 +133,15 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0):
 
     print("\n[제출 파일 생성]")
 
-    # 1. Selector-only (권장 baseline)
+    # 1. Selector-only
     save_csv(all_preds, "submission.csv")
 
-    # 2. Entropy-blend (RegMLP 있을 때)
+    # 2. Entropy-blend (regressor 있을 때)
     if use_blend:
         blended = entropy_blend(all_preds, all_reg, all_logits, beta=beta)
-        save_csv(blended, "submission_blend.csv")
-        print(f"  ※ entropy blend β={beta}  (β 조정: --beta 값)")
+        blend_name = f"submission_blend_{reg2_label}.csv"
+        save_csv(blended, blend_name)
+        print(f"  ※ entropy blend [{reg2_label}] β={beta}  (β 조정: --beta 값)")
 
     # 3. Boundary (이전 실험 잔재, 피처 불일치 시 skip)
     if boundary is not None:
@@ -142,6 +167,8 @@ if __name__ == "__main__":
                         help="Entropy-blend strength: 0=pure selector (default: 1.0)")
     parser.add_argument("--temp", type=float, default=2.0,
                         help="Softmax temperature for Top-k weighted avg (default: 2.0)")
+    parser.add_argument("--reg2", action="store_true",
+                        help="Use TransformerRegressor (reg2) for entropy-blend instead of RegMLP")
     args = parser.parse_args()
 
     if args.seeds:
@@ -151,4 +178,4 @@ if __name__ == "__main__":
     else:
         seeds = [SEED]
 
-    predict(seeds=seeds, beta=args.beta, temp=args.temp)
+    predict(seeds=seeds, beta=args.beta, temp=args.temp, use_reg2=args.reg2)

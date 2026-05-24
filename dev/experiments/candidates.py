@@ -54,7 +54,9 @@ CANDIDATES = [
     CandidateSpec("jerk_small_neg",    1.98,  0.80, -0.05, jerk=-0.08),
 
     # Latency family
-    # latency_s085가 C-group nearest 21.8% → s080/s075로 더 강한 보정 커버
+    # latency_s075가 C-group nearest 25.2% → s060/s065로 더 강한 보정 커버
+    CandidateSpec("latency_s060",      1.98,  0.96, -0.08, time_scale=0.60),
+    CandidateSpec("latency_s065",      1.98,  0.96, -0.08, time_scale=0.65),
     CandidateSpec("latency_s075",      1.98,  0.96, -0.08, time_scale=0.75),
     CandidateSpec("latency_s080",      1.98,  0.96, -0.08, time_scale=0.80),
     CandidateSpec("latency_s085",      1.98,  0.96, -0.08, time_scale=0.85),
@@ -81,6 +83,8 @@ CANDIDATES = [
     CandidateSpec("turn_n045",         1.96,  0.70, -0.45),
     CandidateSpec("turn_p060",         1.90,  0.55,  0.60),
     CandidateSpec("turn_n060",         1.90,  0.55, -0.60),
+    # turn_p075/n075 제거: C-group nearest 17.4%이지만 turn_p060과 피처 유사 → selector 혼란
+    # (oracle 7.5% 기여하지만 선택 불가 → 오히려 B-group 증가 원인)
 
     # 강한 Jerk 커버리지
     CandidateSpec("jerk_l_pos",        1.98,  0.88,  0.00, jerk= 0.30),
@@ -97,8 +101,10 @@ CANDIDATES = [
 
 ]
 # 60-cand 실험(2026-05-22): jerk_xxl~turn_n100 10개 추가 → oracle +3.4pp, efficiency -4.9pp → 실패
-# 52-cand (2026-05-24): latency_s075/s080 추가 (C-group latency_s085 nearest 21.8% 대응)
-#   oracle 소폭 상승 기대, efficiency 영향 미미 (latency 후보는 구분 쉬움)
+# 52-cand (2026-05-24): latency_s075/s080 추가 (C-group latency_s085 nearest 21.8% 대응) → oracle 75.41%
+# 56-cand (2026-05-24): latency_s060/s065 + turn_p075/n075 추가 → oracle 76.16%
+#   turn_p075/n075: oracle 7.5%+7.8% but C-group nearest 17.4%+9.3% → selector 혼란 → 제거
+# 54-cand (2026-05-24): latency_s060/s065 유지 + turn_p075/n075 제거 + SA + family feature
 
 N_CANDIDATES = len(CANDIDATES)
 
@@ -231,7 +237,7 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
     Candidate-specific features.
     x:     (N, 11, 3)
     cands: (N, C, 3)
-    returns: (N, C, 10)
+    returns: (N, C, 11)
     """
     p0, d1, d2, acc, jerk = motion_terms(x, end_idx=10)
     speed   = np.linalg.norm(d1, axis=1, keepdims=True) + EPS  # (N, 1)
@@ -250,6 +256,8 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
 
     speed_h = speed[:, 0] * horizon  # (N,)
 
+    family_arr = np.array([_family_id(s.name) / 5.0 for s in CANDIDATES])
+
     feats = np.stack([
         cand_par  / (speed_h[:, np.newaxis] + EPS),
         cand_perp / (speed_h[:, np.newaxis] + EPS),
@@ -261,7 +269,8 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
         np.array([s.jerk for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
         np.array([s.time_scale for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
         (acc_par[:, 0, np.newaxis] / (speed[:, 0, np.newaxis] + EPS)).repeat(N_CANDIDATES, axis=1),
-    ], axis=2).astype(np.float32)   # (N, C, 10)
+        family_arr[np.newaxis, :].repeat(len(x), axis=0),  # 후보 계열 타입
+    ], axis=2).astype(np.float32)   # (N, C, 11)
 
     return feats
 
@@ -273,12 +282,17 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
 _CAND_PARAMS_CACHE: dict = {}
 
 def _cand_params_gpu(device, dtype):
+    """(C, 7): d1, d2, par, perp, jerk, time_scale, family_id/5"""
     key = (str(device), dtype)
     if key not in _CAND_PARAMS_CACHE:
-        arr = np.array([[s.d1, s.d2, s.par, s.perp, s.jerk, s.time_scale]
-                        for s in CANDIDATES], dtype=np.float32)
+        arr = np.array(
+            [[s.d1, s.d2, s.par, s.perp, s.jerk, s.time_scale,
+              _family_id(s.name) / 5.0]
+             for s in CANDIDATES],
+            dtype=np.float32,
+        )
         _CAND_PARAMS_CACHE[key] = torch.tensor(arr, device=device, dtype=dtype)
-    return _CAND_PARAMS_CACHE[key]  # (C, 6)
+    return _CAND_PARAMS_CACHE[key]  # (C, 7)
 
 
 def make_candidates_gpu(x: torch.Tensor) -> torch.Tensor:
@@ -295,8 +309,8 @@ def make_candidates_gpu(x: torch.Tensor) -> torch.Tensor:
     acc_par  = (acc * tangent).sum(-1, keepdim=True) * tangent
     acc_perp = acc - acc_par
 
-    p = _cand_params_gpu(x.device, x.dtype)             # (C, 6)
-    d1_c, d2_c, par_c, pe_c, jk_c, ts_c = p.unbind(-1) # (C,) each
+    p = _cand_params_gpu(x.device, x.dtype)                      # (C, 7)
+    d1_c, d2_c, par_c, pe_c, jk_c, ts_c, _ = p.unbind(-1)       # (C,) each
     ts2_c = ts_c ** 2
 
     return (
@@ -370,7 +384,7 @@ def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
 
 
 def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:
-    """x: (B,11,3), cands: (B,C,3) → (B,C,10)"""
+    """x: (B,11,3), cands: (B,C,3) → (B,C,11)"""
     p0        = x[:, 10]
     d1        = x[:, 10] - x[:, 9]
     speed     = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
@@ -384,8 +398,8 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
     cand_perp = dist - cand_par.abs()
     speed_h   = speed[:, 0] * 2.0                       # (B,)
 
-    p = _cand_params_gpu(x.device, x.dtype)             # (C, 6)
-    d1_a, d2_a, par_a, pe_a, jk_a, ts_a = p.unbind(-1) # (C,) each
+    p = _cand_params_gpu(x.device, x.dtype)                      # (C, 7)
+    d1_a, d2_a, par_a, pe_a, jk_a, ts_a, fam_a = p.unbind(-1)   # (C,) each
 
     return torch.stack([
         cand_par  / (speed_h[:, None] + EPS),
@@ -398,4 +412,5 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
         jk_a [None].expand(len(x), -1),
         ts_a [None].expand(len(x), -1),
         (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES),
-    ], dim=-1)  # (B, C, 10)
+        fam_a[None].expand(len(x), -1),   # 후보 계열 타입 (base/acc/frenet/turn/jerk/latency)
+    ], dim=-1)  # (B, C, 11)

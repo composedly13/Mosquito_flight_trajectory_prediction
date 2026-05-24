@@ -1,12 +1,15 @@
 from pathlib import Path
 
-# Paths
-DATA_DIR        = Path("data")
+# Paths — resolved relative to this file so scripts work from any cwd
+_EXP_DIR        = Path(__file__).resolve().parent          # dev/experiments/
+_ROOT           = _EXP_DIR.parent.parent                   # project root
+
+DATA_DIR        = _ROOT / "data"
 TRAIN_DIR       = DATA_DIR / "train"
 TEST_DIR        = DATA_DIR / "test"
 LABELS_PATH     = DATA_DIR / "train_labels.csv"
 SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
-OUTPUT_DIR      = Path("dev/experiments/outputs")
+OUTPUT_DIR      = _EXP_DIR / "outputs"
 
 # Training
 SEED        = 42
@@ -46,11 +49,12 @@ SOFT_TEMP       = 0.005   # soft-label temperature
 PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight (0.5 시도 → fold5 붕괴, 유지)
 # LISTMLE_WEIGHT grid: 0.0(baseline A) → 0.05(B) → 0.1(C) → 0.2(D)
 LISTMLE_WEIGHT  = 0.05    # 원래 50-cand + LML=0.05 (multi-seed run: 42+123+777)
-# Oracle Margin Loss weight: oracle logit이 top-5 기준보다 margin=0.15 높도록 강제
-# analyze.py 섹션4에서 'Oracle in Top-5' 수치가 오르는지 확인하며 조절
-# focal weight(2.0)는 oracle rank 악화 확인 → margin loss로 교체
-# 시도 범위: 0.05, 0.10, 0.20 (너무 크면 CE와 충돌, 작으면 효과 없음)
-B_GROUP_WEIGHT  = 0.10
+# Oracle Margin Loss weight
+# focal(2.0) → oracle rank 악화 (13.3→16.4)
+# oracle_margin(0.10) → OOF -0.85pp, B-group 42.6%→48.9%, rank 16.9 (soft-CE와 gradient 충돌)
+# → 두 방식 모두 실패: loss 충돌 구조 확인
+# 현재: 0.0 (CE+PW+LML 순수 config 복귀)
+B_GROUP_WEIGHT  = 0.0
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일

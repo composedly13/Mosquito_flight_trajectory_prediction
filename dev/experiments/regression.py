@@ -224,6 +224,42 @@ def entropy_blend(
     return alpha * sel_preds + (1.0 - alpha) * reg_preds
 
 
+# ── TransformerRegressor inference helpers ────────────────────────────────────
+
+def load_reg2_models(seeds: list, device: torch.device) -> dict:
+    """Returns {seed: [fold0_model, ...]} for TransformerRegressor (reg2_fold{i}.pt)."""
+    from model import TransformerRegressor  # lazy import to avoid circular at module load
+    all_models = {}
+    for seed in seeds:
+        seed_dir = OUTPUT_DIR / f"seed{seed}"
+        fold_models = []
+        for fold in range(N_FOLDS):
+            path = seed_dir / f"reg2_fold{fold}.pt"
+            if path.exists():
+                m = TransformerRegressor().to(device)
+                m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+                m.eval()
+                fold_models.append(m)
+        if fold_models:
+            all_models[seed] = fold_models
+            print(f"  Reg2(Transformer) seed{seed}: {len(fold_models)}/{N_FOLDS} folds 로드")
+        else:
+            print(f"  Reg2(Transformer) seed{seed}: 없음 (python train_regressor.py --seed {seed})")
+    return all_models
+
+
+def predict_reg2_batch(
+    reg2_models: list,        # flat list of all loaded TransformerRegressor models
+    coords: torch.Tensor,     # (B, 11, 3) on device
+) -> torch.Tensor:            # (B, 3)
+    """Average predictions across all TransformerRegressor models."""
+    from candidates import make_seq_features_gpu
+    with torch.no_grad():
+        seq_f = make_seq_features_gpu(coords)   # (B, 11, 11)
+        p0    = coords[:, -1, :]                # (B, 3) 마지막 알려진 위치
+        return sum(m(seq_f, p0) for m in reg2_models) / len(reg2_models)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=SEED)
