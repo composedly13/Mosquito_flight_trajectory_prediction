@@ -283,20 +283,19 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **54개** (52-cand + latency_s060/s065 추가) |
+| Candidates | **60개** (54-cand + near_stop/reverse_mild/latency_s040/s050/turn_p090/n090 추가) |
 | Cand features | **CAND_DIM=11** (family_id/5 추가 — 후보 계열 타입 피처) |
 | Augmentation | **yaw-only** |
 | Selector | Transformer + Cross-Attention + **Candidate Self-Attention** (d_model=128, 3 layers) |
 | Seq features | **11개** (SEQ_DIM=11) |
-| Loss | **CE + PW×0.25 + LML×0.05** (B_GROUP_WEIGHT=0.0, oracle_margin 실험 실패) |
+| Loss | **CE + PW×0.25 + LML×0.05** (ENTROPY_WEIGHT=0.0, entropy penalty 실험 실패) |
 | Prediction | **Top-10** weighted average, temp=2.0 |
 | Boundary MLP | **완전 제거** |
 | TTA | **효과 없음** (TTA×8 → +0.0001pp) |
-| OOF (3-seed) | **0.6474** (seeds 42+777+123, 15 models) |
-| Oracle ceiling | **75.78%** (54-cand 기준) |
-| Selector efficiency | **85.4%** |
-| LB (best) | **0.6716** (구 아키텍처 seed42 단독) |
-| LB (현재) | **0.6712** (새 아키텍처 seed42 단독) / **0.6672** (3-seed) |
+| OOF (3-seed, Phase 9) | **0.6445** (seeds 42+777+123, 60-cand, entropy 역효과 포함) |
+| Oracle ceiling | **76.75%** (60-cand 기준, Phase 8 75.78% 대비 +0.97pp) |
+| Selector efficiency | **84.0%** |
+| LB (best) | **0.6712** (Phase 7/8 seed42 단독) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
@@ -352,6 +351,10 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Phase 8-5: 54-cand + SA, seed123 | 54 | — | 75.78% | 84.7% | 0.6417 | |
 | **Phase 8 제출: 3-seed (42+777+123), temp=2.0** | 54 | — | 75.78% | **85.4%** | **0.6474** | **LB 0.6672** ❌ single-seed(0.6712) 하회 — seed777/123 variance 희석 |
 | Phase 8 단일 seed42 제출 | 54 | — | 75.78% | 84.9% | 0.6435 | **LB 0.6712** (구 아키텍처 best와 동등) |
+| **Phase 9: 60-cand + entropy penalty (seed42)** | **60** | 0.6341 | **76.75%** | 82.6% | 0.6341 | entropy 역효과: oracle rank 17.6→24.7 ❌ |
+| Phase 9: 60-cand + entropy penalty (seed777) | 60 | 0.6360 | 76.75% | 82.9% | 0.6361 | |
+| Phase 9: 60-cand + entropy penalty (seed123) | 60 | 0.6393 | 76.75% | 83.3% | 0.6393 | |
+| **Phase 9: 3-seed 앙상블 (42+777+123)** | **60** | — | **76.75%** | **84.0%** | **0.6445** | OOF −0.29pp vs P8 — entropy penalty 제거 필요 |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -1728,60 +1731,108 @@ OUTPUT_DIR = _EXP_DIR / "outputs"
 
 ---
 
-### 다음 실험 계획 (Phase 9)
+### 2026-05-24 (3)
 
-**목표: LB 0.71**
+**[Phase 9: 60-cand + Entropy Penalty — 역효과 확인]**
 
-수치 분석:
-```
-Oracle ceiling (54-cand): 75.78%
-현재 OOF: 0.6474 (3-seed)
-0.71 LB ≈ OOF 0.685 필요 → 갭 +0.038
+**목표**: Oracle ceiling 돌파(54→60-cand) + Entropy penalty로 B-group 선택 정확도 개선 → LB 0.71
 
-A (28.0%) × 0.8795 = 0.2463  ← 이미 양호
-B (47.8%) × 0.8308 = 0.3971  ← 최대 레버
-C (24.2%) × 0.0012 = 0.0003  ← 구조 한계
-```
+**작업 1 — 60-cand 확장**
 
-**Phase 9-1 — C-group 후보 확장 (oracle ceiling 돌파)**
+C-group 갭 분석 기반으로 6개 후보 추가 (54→60):
 
-C-group 갭 분석:
-| 파라미터 | 현재 커버리지 | C-group p95 | 초과 비율 |
-|---|---|---|---|
-| `\|perp\|` | ≤ 0.60 | 1.03 | 16.1% → 약 390샘플 |
-| `par` | [0, 1.20] | p5=-0.37, p95=1.29 | 21.2% → 약 514샘플 |
+| 이름 | 파라미터 | 근거 |
+|---|---|---|
+| `latency_s050` | time_scale=0.50, par≈0.495 | 급감속(par→0) 커버 |
+| `latency_s040` | time_scale=0.40, par≈0.396 | 더 강한 급감속 |
+| `near_stop` | d1=0.40, par≈0.20 | 거의 정지 케이스 |
+| `reverse_mild` | d1=−0.50, par≈−0.25 | 역방향 이동 |
+| `turn_p090` | perp=+0.90 | 날카로운 우회전 (|perp| 초과 16.1% 타겟) |
+| `turn_n090` | perp=−0.90 | 날카로운 좌회전 |
 
-추가 후보:
-- `latency_s030/s040/s050`: time_scale 극단 축소 → par→0 방향 (급감속/정지)
-- `turn_p090/n090`: |perp|=0.90 (날카로운 회전)
-
-이론적 최대 이득: 390샘플(3.9%) × 0.85 = **+0.033 OOF**
-
-**Phase 9-2 — entropy penalty (B-group 선택 정확도)**
+**작업 2 — Entropy Penalty (ENTROPY_WEIGHT=0.02)**
 
 ```python
 # train.py에 추가
-H    = -(F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1)).sum(-1).mean()
-loss = loss + ENTROPY_WEIGHT * H   # ENTROPY_WEIGHT=0.02
+if ENTROPY_WEIGHT > 0:
+    probs = F.softmax(logits, dim=-1)
+    H = -(probs * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    loss = loss + ENTROPY_WEIGHT * H
 ```
 
-logit이 날카로워짐 → oracle rank 17.6 → 목표 ≤ 8 → Oracle in Top-5 38% → 목표 ≥ 55%
+목적: H 최소화 → logit 집중 → oracle이 top-5에 들어오도록 강제
 
-예상 효과: B-group hit 0.831 → 0.870 → OOF **+0.019**
+**3-seed 학습 결과**
 
-**단계별 목표**
+| seed | CV mean | OOF | Oracle |
+|---:|---:|---:|---:|
+| 42 | 0.6341 ± 0.0084 | 0.6341 | 76.75% |
+| 777 | 0.6360 ± 0.0100 | 0.6361 | 76.75% |
+| 123 | 0.6393 ± 0.0053 | 0.6393 | 76.75% |
+| **3-seed** | — | **0.6445** | 76.75% |
 
-| 단계 | 내용 | 예상 OOF | 예상 LB |
-|---|---|---:|---:|
-| 현재 | 54-cand + SA, 3-seed | 0.6474 | 0.6672 |
-| Phase 9-1 | C-group 후보 확장 (~56-58개) | +0.017 | ~0.685 |
-| Phase 9-2 | entropy penalty + 재학습 | +0.015 | ~0.695 |
-| 3-seed 앙상블 | 재훈련 3개 seed | +0.005 | ~**0.710** |
+**analyze.py 결과 (3-seed)**
+
+| 지표 | Phase 8 (54-cand) | Phase 9 (60-cand+entropy) | 변화 |
+|---|---:|---:|---:|
+| 3-seed OOF | **0.6474** | 0.6445 | **−0.29pp ❌** |
+| Oracle ceiling | 75.78% | **76.75%** | +0.97pp ✅ |
+| Oracle rank mean | 17.6 | **24.7** | **+7.1 ❌** |
+| A-group (oracle in top-5) | 28.0% | **16.9%** | **−11.1pp ❌** |
+| B-group | 47.8% | **59.8%** | **+12.0pp ❌** |
+| C-group | 24.2% | **23.2%** | −1.0pp ✅ |
+| Entropy H (mean) | 0.986 | **0.986** | 변화 없음 ❌ |
+
+**실패 원인 분석 — Entropy Penalty 역효과**
+
+| 의도 | 현실 |
+|---|---|
+| H 최소화 → logit 집중 → oracle 상위 랭킹 | 모델이 CE + 엔트로피 동시 최소화를 위해 "자주 oracle인" 후보에 무조건 집중 |
+| 샘플별 oracle 식별 강화 | `jerk_xl_pos/neg`, `turn_p/n090` 등 인기 후보에 항상 high logit 부여 → oracle이 아닌 샘플에서 rank 폭락 |
+| ENTROPY_WEIGHT=0.02로 구조적 한계 돌파 | H ≈ 0.986 그대로 — 60-cand 환경에서 0.02 가중치는 CE loss에 묻혀 무효 |
+
+**결론**
+
+- ✅ Oracle ceiling: 75.78% → 76.75% (+0.97pp) — 60-cand 자체는 유효
+- ❌ Entropy penalty: oracle rank 17.6 → 24.7로 악화 — 제거 필요
+- ❌ 3-seed OOF: 0.6474 → 0.6445 (-0.29pp) — Phase 8 대비 퇴행
+
+**다음 방향 (Phase 10)**
+
+- `ENTROPY_WEIGHT = 0.0` (제거)
+- 60-cand 유지
+- 3-seed 재훈련 → oracle rank 회복 + oracle ceiling(76.75%) 활용
+
+---
+
+### 다음 실험 계획 (Phase 10)
+
+**목표: LB 0.71**
+
+**현재 상황 (Phase 9 이후)**
+
+| 항목 | 값 |
+|---|---|
+| Oracle ceiling | 76.75% (60-cand) |
+| 3-seed OOF | 0.6445 |
+| 70% 달성 필요 efficiency | ≥ 91.2% |
+| 현재 efficiency | 84.0% → 갭 7.2pp |
+
+**Phase 10 전략 — 동시 실행**
+
+| 작업 | 내용 | 기대 효과 |
+|---|---|---|
+| `ENTROPY_WEIGHT = 0.0` | entropy penalty 제거 (역효과 확인) | oracle rank 24.7 → ~17 회복 |
+| 60-cand 유지 + C-group 후보 보강 | oracle ceiling 76.75%+ 유지 | Oracle ↑, C-group 감소 |
+| `predict.py temp=2.0` 고정 | analyze에서 +1pp 확인된 무료 이득 | +1pp |
+| 3-seed 재훈련 | 60-cand + 순수 CE+PW+LML=0.05 | OOF ~0.655+ 목표 |
 
 ```bash
-# Phase 9 실행 순서
-python dev/experiments/train.py --seed 42   # 새 candidates + entropy penalty
-python dev/experiments/analyze.py --seed 42  # oracle ceiling + B/C group 확인
-# (통과 시) seed 777, 123 재훈련
-python dev/experiments/predict.py --seeds 42 777 123 --temp 2.0
+# Phase 10 실행 순서
+# 1. config.py: ENTROPY_WEIGHT = 0.0
+python dev/experiments/train.py --seed 42
+python dev/experiments/train.py --seed 777
+python dev/experiments/train.py --seed 123
+python dev/experiments/analyze.py --seeds 42 777 123
+python dev/experiments/predict.py --seeds 42 777 123
 ```

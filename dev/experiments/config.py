@@ -61,7 +61,7 @@ B_GROUP_WEIGHT  = 0.0
 # entropy H = -Σ p log p (uniform → max, peaked → 0)
 # loss += ENTROPY_WEIGHT × H → 높은 엔트로피를 penalize → logit 집중
 # 현재 H ≈ 0.986 (54-cand, 구조적 최대치) → 날카로운 logit 유도로 oracle rank 개선 기대
-ENTROPY_WEIGHT  = 0.02
+ENTROPY_WEIGHT  = 0.0
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일
