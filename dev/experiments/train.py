@@ -1,0 +1,231 @@
+import argparse
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Subset
+from pathlib import Path
+from tqdm import tqdm
+import hashlib
+
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, ENTROPY_WEIGHT
+from dataset import (
+    load_all, MosquitoDataset,
+    augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
+)
+from model import CandidateSelector, soft_labels, selector_predict
+from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
+
+
+def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
+    return float(np.mean(np.linalg.norm(pred - true, axis=-1) <= R_HIT_THRESHOLD))
+
+
+def fold_id(sample_id: str, n_folds: int = N_FOLDS) -> int:
+    return int(hashlib.md5(sample_id.encode()).hexdigest()[:8], 16) % n_folds
+
+
+def pairwise_loss(logits: torch.Tensor, soft: torch.Tensor, margin: float = 0.12) -> torch.Tensor:
+    """Ranking loss: good candidates should score higher than bad ones."""
+    good = (soft > 0.1).float()
+    bad  = (soft < 0.01).float()
+    score_good = (logits * good).sum(dim=-1) / (good.sum(dim=-1) + 1e-8)
+    score_bad  = (logits * bad).sum(dim=-1)  / (bad.sum(dim=-1)  + 1e-8)
+    return F.relu(margin - score_good + score_bad).mean()
+
+
+def listmle_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
+    """Oracle 후보를 top-1으로 직접 최적화: -log P(oracle ranked first)."""
+    dist       = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
+    oracle_idx = dist.argmin(dim=-1)                             # (B,)
+    return -F.log_softmax(logits, dim=-1).gather(1, oracle_idx.unsqueeze(1)).mean()
+
+
+def oracle_margin_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor,
+                       k: int = 5, margin: float = 0.15) -> torch.Tensor:
+    """
+    Oracle Top-K Margin Loss:
+    oracle 후보의 logit이 k번째 높은 logit보다 margin만큼 높아야 한다.
+    → oracle이 top-k 안에 들어오도록 직접 강제.
+    oracle이 없는 샘플(C-group)은 loss=0.
+
+    k=5: oracle을 top-5로 끌어올림 (현재 Oracle in Top-5 = 39.2% → 개선 목표)
+    margin=0.15: 충분한 마진 확보
+    """
+    dist        = torch.norm(cands - true.unsqueeze(1), dim=-1)   # (B, C)
+    oracle_dist = dist.min(dim=-1).values                          # (B,)
+    oracle_idx  = dist.argmin(dim=-1)                              # (B,)
+
+    oracle_score = logits.gather(1, oracle_idx.unsqueeze(1))       # (B, 1)
+    # k번째로 높은 logit: oracle이 이것보다 높아야 top-k에 들어감
+    kth_score    = logits.kthvalue(logits.size(1) - k + 1, dim=1).values.unsqueeze(1)  # (B, 1)
+
+    loss = F.relu(kth_score - oracle_score + margin)               # (B, 1)
+
+    # C-group(oracle 없음)은 학습에서 제외
+    is_hit = (oracle_dist <= R_HIT_THRESHOLD).float().unsqueeze(1) # (B, 1)
+    return (loss * is_hit).mean()
+
+
+def train_fold(
+    fold: int,
+    ids: list,
+    coords: np.ndarray,
+    labels: np.ndarray,
+    device: torch.device,
+):
+    val_mask   = np.array([fold_id(i) == fold for i in ids])
+    train_mask = ~val_mask
+
+    train_ds = MosquitoDataset(coords[train_mask], labels[train_mask], augment=True)
+    val_ds   = MosquitoDataset(coords[val_mask],   labels[val_mask],   augment=False)
+
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+
+    model     = CandidateSelector().to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+    best_hit, best_state, patience_cnt = 0.0, None, 0
+    best_preds = np.zeros((val_mask.sum(), 3), dtype=np.float32)
+
+    pbar = tqdm(range(1, EPOCHS + 1), desc=f"Fold {fold}")
+    for epoch in pbar:
+        # Train
+        model.train()
+        for batch in train_loader:
+            coords_b = batch["coords"].to(device, non_blocking=True)
+            true     = batch["label"].to(device, non_blocking=True)
+
+            if AUG_MODE == 'so3':
+                coords_b, true = augment_batch_gpu(coords_b, true)
+            elif AUG_MODE == 'yaw':
+                coords_b, true = augment_batch_gpu_yaw(coords_b, true)
+            elif AUG_MODE == 'yaw_speed':
+                coords_b, true = augment_batch_gpu_yaw(coords_b, true)
+                coords_b, true = augment_speed_scale_gpu(
+                    coords_b, true,
+                    scale_range=SPEED_SCALE_RANGE,
+                    prob=SPEED_SCALE_PROB,
+                )
+
+            cands  = make_candidates_gpu(coords_b)
+            seq_f  = make_seq_features_gpu(coords_b)
+            cand_f = make_cand_features_gpu(coords_b, cands)
+
+            logits = model(seq_f, cand_f)                        # (B, C)
+            soft   = soft_labels(cands, true)                    # (B, C)
+
+            loss_ce   = -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+            loss_pair = pairwise_loss(logits, soft)
+            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
+            if LISTMLE_WEIGHT > 0:
+                loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
+            if B_GROUP_WEIGHT > 0:
+                # oracle margin: oracle logit이 top-5 기준선보다 높도록 직접 강제
+                loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
+            if ENTROPY_WEIGHT > 0:
+                # Entropy penalty: 높은 엔트로피(불확실한 logit)를 penalize → 날카로운 logit 유도
+                # H = -Σ p·log(p), normalized ∈ [0,1]. loss += ENTROPY_WEIGHT × H
+                probs = F.softmax(logits, dim=-1)
+                H = -(probs * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+                loss = loss + ENTROPY_WEIGHT * H
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+        scheduler.step()
+
+        # Val
+        model.eval()
+        preds, trues = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                coords_b = batch["coords"].to(device, non_blocking=True)
+
+                cands  = make_candidates_gpu(coords_b)
+                seq_f  = make_seq_features_gpu(coords_b)
+                cand_f = make_cand_features_gpu(coords_b, cands)
+
+                logits = model(seq_f, cand_f)
+                pred   = selector_predict(logits, cands, topk=TOPK)
+                preds.append(pred.cpu().numpy())
+                trues.append(batch["label"].cpu().numpy())
+
+        preds = np.concatenate(preds)
+        trues = np.concatenate(trues)
+        hit   = r_hit(preds, trues)
+
+        if hit > best_hit:
+            best_hit   = hit
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            best_preds = preds.copy()
+            patience_cnt = 0
+        else:
+            patience_cnt += 1
+
+        pbar.set_postfix(hit=f"{hit:.4f}", best=f"{best_hit:.4f}", patience=patience_cnt)
+
+        if patience_cnt >= PATIENCE:
+            print(f"  Early stop at epoch {epoch}")
+            break
+
+    return best_hit, best_state, val_mask, best_preds
+
+
+def train(seed: int = SEED):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}")
+
+    # Each seed gets its own subdirectory so multi-seed runs don't overwrite each other.
+    out_dir = OUTPUT_DIR / f"seed{seed}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
+
+    fold_results = []
+    all_states   = []
+    oof_preds    = np.zeros((len(ids), 3), dtype=np.float32)
+
+    for fold in range(N_FOLDS):
+        print(f"\n=== Fold {fold + 1}/{N_FOLDS} ===")
+        hit, state, val_mask, val_preds = train_fold(fold, ids, coords, labels, device)
+        fold_results.append(hit)
+        all_states.append(state)
+        oof_preds[val_mask] = val_preds
+        print(f"Fold {fold + 1} best R-Hit: {hit:.4f}")
+
+    print(f"\n{'='*40}")
+    print(f"CV mean R-Hit: {np.mean(fold_results):.4f} ± {np.std(fold_results):.4f}")
+    for i, h in enumerate(fold_results):
+        print(f"  Fold {i+1}: {h:.4f}")
+
+    oof_hit = r_hit(oof_preds, labels)
+    print(f"OOF R-Hit (selector only): {oof_hit:.4f}")
+
+    # Oracle: 후보군 상한선 진단
+    oracle_cands     = make_candidates(coords)                         # (N, C, 3)
+    min_dists        = np.linalg.norm(
+        oracle_cands - labels[:, np.newaxis, :], axis=-1
+    ).min(axis=1)
+    oracle_hit_score = float(np.mean(min_dists <= R_HIT_THRESHOLD))
+    print(f"Oracle R-Hit ({N_CANDIDATES} candidates): {oracle_hit_score:.4f}"
+          f"  (selector efficiency: {oof_hit / oracle_hit_score:.1%})")
+
+    # Save selector models
+    for i, state in enumerate(all_states):
+        torch.save(state, out_dir / f"selector_fold{i}.pt")
+
+    print(f"\nModels saved to {out_dir}/")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=SEED,
+                        help="Random seed (default: config.SEED). Use different seeds for ensemble.")
+    args = parser.parse_args()
+    train(seed=args.seed)
