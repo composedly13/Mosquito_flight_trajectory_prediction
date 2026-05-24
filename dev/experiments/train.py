@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, ENTROPY_WEIGHT
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
@@ -125,6 +125,12 @@ def train_fold(
             if B_GROUP_WEIGHT > 0:
                 # oracle margin: oracle logit이 top-5 기준선보다 높도록 직접 강제
                 loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
+            if ENTROPY_WEIGHT > 0:
+                # Entropy penalty: 높은 엔트로피(불확실한 logit)를 penalize → 날카로운 logit 유도
+                # H = -Σ p·log(p), normalized ∈ [0,1]. loss += ENTROPY_WEIGHT × H
+                probs = F.softmax(logits, dim=-1)
+                H = -(probs * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+                loss = loss + ENTROPY_WEIGHT * H
 
             optimizer.zero_grad()
             loss.backward()

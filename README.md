@@ -109,9 +109,22 @@ MISS 케이스는 급격한 방향 전환이 원인 — 속도(+20%), 가속도(
 | seq_proj | Linear(11 → 128) |
 | PositionalEncoding | Embedding(11, 128) |
 | TransformerEncoder | d_model=128, nhead=4, layers=3, norm_first=True |
-| cand_proj | Linear(10 → 128) |
+| cand_proj | Linear(**11** → 128) |
 | cross_attn | MultiheadAttention(candidates → sequence) |
-| head | Linear(128×2+10 → 128) → GELU → Linear(128 → 1) per candidate |
+| **cand_self_attn** | **MultiheadAttention(candidates → candidates) — 후보 간 상대 비교** |
+| head | Linear(128×2+**11** → 128) → GELU → Linear(128 → 1) per candidate |
+
+### TransformerRegressor (C-group 보조 모델)
+
+```
+입력: seq_feat (11, 11) — 후보 불필요
+출력: p0 + Δ (3D offset 직접 예측)
+구조: CandidateSelector와 동일한 TransformerEncoder → head → Linear(128 → 3)
+```
+
+- C-group 전용 직접 회귀 모델 (entropy-based blend 용도)
+- 현재 실험 결과: C-group R-Hit@1cm = 0.62% (1cm 임계값 기준 거의 무효)
+- entropy H ≈ 0.986 (54개 후보 → 구조적으로 항상 최대 엔트로피) → blend 비활성화 상태
 
 ### 손실 함수
 
@@ -138,7 +151,23 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 | Frenet | 10 | 접선/법선 방향 세밀 분해 (중복 제거) |
 | Turn | 13 | 방향 전환 (|perp| 0.20~0.80) — C그룹 기반 극단 강화 |
 | Jerk | 6 | 순간 가속도 변화 (|jerk| 0.08~0.80) — C그룹 기반 강화 |
-| Latency | 16 | 시스템 지연 보정 (0.75~1.20×) + turn 복합 |
+| Latency | **20** | 시스템 지연 보정 (0.60~1.20×) + turn 복합 — **s060/s065 추가** |
+
+**cand_feat 피처 구성 (CAND_DIM=11)**
+
+| # | 피처 | 설명 |
+|---|---|---|
+| 0 | cand_par_norm | 후보 접선 방향 거리 / speed |
+| 1 | cand_perp_norm | 후보 법선 방향 거리 / speed |
+| 2 | dist_norm | 후보 전체 거리 / speed |
+| 3 | d1 | 속도 스케일 파라미터 |
+| 4 | par | 접선 가속도 파라미터 |
+| 5 | perp | 법선 가속도 파라미터 |
+| 6 | d2 | 2차 속도 파라미터 |
+| 7 | jerk | jerk 파라미터 |
+| 8 | time_scale | 시간 스케일 보정 파라미터 |
+| 9 | acc_par_s | 시퀀스 기반 접선 가속도 |
+| **10** | **family_id/5** | **후보 계열 타입 (base/acc/frenet/turn/jerk/latency)** |
 
 ### 학습 전략
 
@@ -184,9 +213,11 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 │       ├── config.py            # 경로 및 하이퍼파라미터
 │       ├── candidates.py        # Frenet 기반 후보 생성 + 피처 추출
 │       ├── dataset.py           # MosquitoDataset + augment_batch_gpu / augment_speed_scale_gpu
-│       ├── model.py             # CandidateSelector (Transformer)
-│       ├── boundary.py          # BoundaryMLP (잔차 보정)
-│       ├── train.py             # K-Fold 학습 루프
+│       ├── model.py             # CandidateSelector + TransformerRegressor
+│       ├── boundary.py          # BoundaryMLP (잔재, 미사용)
+│       ├── train.py             # K-Fold 학습 루프 (CandidateSelector)
+│       ├── train_regressor.py   # TransformerRegressor 학습 (C-group 실험용)
+│       ├── regression.py        # RegMLP / Reg2 inference helpers + entropy blend
 │       ├── predict.py           # 앙상블 추론 + 제출 파일 생성
 │       └── outputs/             # 저장된 모델 가중치 (레포 미포함)
 │           ├── seed42/          #   seed별 서브디렉토리 (train.py --seed 42)
@@ -252,17 +283,20 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **52개** (original 50-cand + latency_s075/s080 추가 — Phase 7 C-group 대응) |
-| Augmentation | **yaw-only** (speed-scale 0.85~1.15 실험 결과 효과 없음 → 복귀) |
-| Selector | Transformer + Cross-Attention (d_model=128, 3 layers) |
-| Seq features | **11개** (jerk_abs, acc_cos — SEQ_DIM 9→11) |
-| Loss | **CE + PW×0.25 + LML×0.05 + OracleMargin×0.10** |
-| Prediction | **Top-10** weighted average, temp=2.0 (52-cand 최적) |
-| Boundary MLP | **완전 제거** (OOF -7.93pp, 구조적 한계 확인) |
-| TTA | **완전 제거** (효과 없음, yaw 불변 모델) |
-| CV R-Hit | **65.10%** (seed42, 52-cand + OracleMargin 학습 전 기준: 65.10% OOF) |
-| Oracle ceiling | **75.41%** (52-cand 기준, original 대비 +0.52pp) |
-| Selector efficiency | **86.3%** (목표: eff ≥ 93.5% → OOF≥0.677 → LB≈0.702) |
+| Candidates | **54개** (52-cand + latency_s060/s065 추가) |
+| Cand features | **CAND_DIM=11** (family_id/5 추가 — 후보 계열 타입 피처) |
+| Augmentation | **yaw-only** |
+| Selector | Transformer + Cross-Attention + **Candidate Self-Attention** (d_model=128, 3 layers) |
+| Seq features | **11개** (SEQ_DIM=11) |
+| Loss | **CE + PW×0.25 + LML×0.05** (B_GROUP_WEIGHT=0.0, oracle_margin 실험 실패) |
+| Prediction | **Top-10** weighted average, temp=2.0 |
+| Boundary MLP | **완전 제거** |
+| TTA | **효과 없음** (TTA×8 → +0.0001pp) |
+| OOF (3-seed) | **0.6474** (seeds 42+777+123, 15 models) |
+| Oracle ceiling | **75.78%** (54-cand 기준) |
+| Selector efficiency | **85.4%** |
+| LB (best) | **0.6716** (구 아키텍처 seed42 단독) |
+| LB (현재) | **0.6712** (새 아키텍처 seed42 단독) / **0.6672** (3-seed) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
@@ -308,10 +342,20 @@ python dev/experiments/predict.py --seeds 42 123 777
 | **Phase 6 2차: 3-seed 42+123+777 (원래 50, LML=0.05, 일관)** | 50 | — | 74.89% | 86.5% | **0.6479** | 기준선 0.6489 미달 (−0.05pp) → seed42 단독과 사실상 동등 |
 | **Phase 7-1: 52-cand (latency_s075/080 추가)** | 52 | — | **75.41%** | 86.3% | **0.6510** | Oracle +0.52pp, OOF +0.26pp — C-group 일부 커버 |
 | Phase 7-2: 52-cand + B-group focal weight×2.0 | 52 | — | 75.41% | — | — | ❌ B-group 42.6%→46.6%, oracle rank 13.3→16.4 악화 |
+| Phase 8-1: oracle_margin_loss ×0.10 | 52 | — | 75.41% | — | 0.6425 | ❌ B-group 48.9%, rank 16.9 — soft-CE 충돌 |
+| **Phase 8 (54-cand+SA+family, 3-seed)** | **54** | — | **75.78%** | **85.4%** | **0.6474** | oracle rank 17.6, B-group 47.8%, C-group 24.2% |
 | **Phase 7 제출: seed42, temp=2.0** | 52 | — | 75.41% | 86.3% | 0.6510 | **LB 0.6712** (focal 실패 후 selector-only 제출) |
+| Phase 8-1: oracle_margin_loss (B_GROUP_WEIGHT=0.10) | 52 | — | 75.41% | — | 0.6425 | ❌ B-group 42.6%→48.9%, oracle rank 13.3→16.9 악화 — soft-CE와 gradient 충돌 |
+| Phase 8-2: B_GROUP_WEIGHT=0.0 복귀 | 52 | — | 75.41% | 85.7% | 0.6460 | 복구 확인 |
+| Phase 8-3: 54-cand + SA + family feat (seed42) | 54 | — | **75.78%** | 84.9% | 0.6435 | CAND_DIM 10→11, candidate self-attention 추가 |
+| Phase 8-4: 54-cand + SA, seed777 재훈련 | 54 | — | 75.78% | 84.9% | 0.6432 | 구 아키텍처 호환 불가 → 재학습 필요 |
+| Phase 8-5: 54-cand + SA, seed123 | 54 | — | 75.78% | 84.7% | 0.6417 | |
+| **Phase 8 제출: 3-seed (42+777+123), temp=2.0** | 54 | — | 75.78% | **85.4%** | **0.6474** | **LB 0.6672** ❌ single-seed(0.6712) 하회 — seed777/123 variance 희석 |
+| Phase 8 단일 seed42 제출 | 54 | — | 75.78% | 84.9% | 0.6435 | **LB 0.6712** (구 아키텍처 best와 동등) |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
-> ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.
+> ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
+> § TransformerRegressor(reg2) OOF: C-group 0.62%, overall 2.25% — entropy H≈0.986(54개 구조적 최대) → blend 무효.
 
 ### Selector Error Decomposition
 
@@ -1482,7 +1526,7 @@ Oracle Error Decomposition (3-seed):
 
 ---
 
-### 2026-05-24
+### 2026-05-24 (1)
 
 **[Phase 7: 52-cand + B-group 개선 시도 → LB 0.6712]**
 
@@ -1588,53 +1632,156 @@ python dev/experiments/predict.py --seed 42 --temp 2.0
 
 ---
 
-### 다음 실험 계획
+### 2026-05-24 (2)
 
-**Phase 8 — Oracle Margin Loss 검증**
+**[Phase 8: Oracle Margin Loss 실패 → 54-cand + SA + 아키텍처 개선 → LB 0.6672]**
 
-```bash
-# 재학습 (oracle_margin_loss, B_GROUP_WEIGHT=0.10)
-python dev/experiments/train.py --seed 42
-# 진단
-python dev/experiments/analyze.py --seed 42
-# 기대 지표
-#   Oracle in Top-5: 39.2% → ≥ 50%
-#   Oracle rank mean: 13.3 → ≤ 10
-#   B-group: 42.6% → ≤ 38%
-# 통과 시 제출
-python dev/experiments/predict.py --seed 42 --temp 2.0
+**작업 1 — oracle_margin_loss 실험: 실패**
+
+`B_GROUP_WEIGHT=0.10` 추가 (`CE + PW×0.25 + LML×0.05 + OracleMargin×0.10`):
+
+| 지표 | 52-cand base | oracle_margin×0.10 |
+|---|---:|---:|
+| OOF | 0.6460 | **0.6425** (❌ −0.35pp) |
+| B-group | 42.6% | **48.9%** (❌ +6.3pp 악화) |
+| Oracle rank mean | 13.3 | **16.9** (❌ 악화) |
+
+실패 원인: soft-CE loss가 oracle logit을 높이도록 유도하고, oracle_margin_loss 역시 같은 방향으로 압력을 주지만 두 gradient 방향이 충돌하여 오히려 불안정. → `B_GROUP_WEIGHT=0.0` 복귀.
+
+**작업 2 — 아키텍처 개선: 54-cand + candidate self-attention + family feature**
+
+```python
+# model.py 변경
+CAND_DIM = 11  # 10 → 11 (family_id/5 추가)
+self.cand_self_attn = nn.MultiheadAttention(...)  # 후보 간 상대 비교
+self.cand_sa_norm   = nn.LayerNorm(d_model)
+
+# candidates.py 변경
+N_CANDIDATES = 54  # 52 → 54 (latency_s060, latency_s065 추가)
+# cand_feat 11번째 피처: family_id/5 (base/acc/frenet/turn/jerk/latency 계열 구분)
 ```
 
-| 체크포인트 | 기준 | 다음 행동 |
-|---|---|---|
-| Oracle in Top-5 ≥ 50% | ✅ 통과 | seed777 재학습 → 2-seed 앙상블 |
-| Oracle in Top-5 < 50% | ❌ 실패 | `B_GROUP_WEIGHT` 조정 (0.05 또는 0.20) 또는 `margin` 조정 |
-| OOF ≥ 0.655 | ✅ 통과 | 제출 시도 |
-| OOF < 0.651 | ❌ 퇴보 | focal failure 재진단 |
+| 지표 | 52-cand (base) | 54-cand + SA + family |
+|---|---:|---:|
+| OOF (seed42) | 0.6460 | 0.6435 |
+| Oracle ceiling | 75.41% | **75.78%** (+0.37pp) |
+| C-group | 22.6% | **24.2%** (+1.6pp ↑) |
+| Oracle rank mean | 13.3 | **17.6** (SA 동질화 부작용) |
 
-**Phase 9 — 2-seed 앙상블 (Phase 8 통과 시)**
+SA 추가 효과:
+- ✓ B-group top-10 hit 약간 개선 (모든 후보를 보고 상대 비교 가능)
+- ✗ Oracle rank 악화: oracle(비정상 후보)이 55개 비-oracle 후보 방향으로 끌림 — 동질화(homogenization)
 
-```bash
-python dev/experiments/train.py --seed 777
-python dev/experiments/analyze.py --seeds 42 777
-python dev/experiments/predict.py --seeds 42 777 --temp 2.0
+**작업 3 — TransformerRegressor (C-group 직접 회귀): 실패**
+
+```python
+# model.py 추가
+class TransformerRegressor(nn.Module):
+    """seq_feat(B,11,11) + p0(B,3) → p0 + offset(B,3)"""
 ```
 
-기대: OOF 분산 감소 → LB ≥ 0.675
+C-group 전용 직접 회귀 모델 학습 (train_regressor.py, L2 distance loss):
 
-**Phase 10 — Oracle ceiling 추가 개선**
+| 지표 | 값 |
+|---|---|
+| OOF R-Hit (overall) | 2.25% |
+| OOF R-Hit (C-group) | **0.62%** (random 수준) |
+| mean dist (C-group) | **6.1cm** >> 1cm threshold |
 
-| 방향 | 내용 | 기대 |
-|---|---|---|
-| Latency 계열 세분화 | s060~s070 추가 (강한 latency) | C-group −3pp |
-| Turn 세분화 | |perp| 0.10~0.15 구간 촘촘히 | B-group C-group 공략 |
-| jerk 다양화 | 법선/접선 복합 방향 | C-group 특이 패턴 |
+실패 원인: C-group은 정의상 "물리 예측이 실패하는 비정형 샘플". 10K 학습 데이터에서 직접 회귀로 1cm 정밀도 달성 불가.
+
+**entropy 분석: 구조적 문제 발견**
+
+```
+selector logit entropy H: mean=0.986  p25=0.989  p75=0.998
+(최대 엔트로피 = 1.0, 54개 후보)
+```
+
+54개 후보 환경에서 logit 차이가 0.1~0.3이면 H ≈ 0.987 — 수학적 필연. entropy로는 C/A/B group 구분 불가 → reg2 blend 무효.
+
+**multi-seed 앙상블 결과 (54-cand + SA, seeds 42+777+123)**
+
+| 지표 | 값 |
+|---|---|
+| 3-seed OOF | **0.6474** (+0.39pp vs seed42 단독) |
+| Multi-seed efficiency | 85.4% |
+| **LB (3-seed)** | **0.6672** |
+| **LB (single seed42)** | **0.6712** |
+
+3-seed가 단일 seed보다 LB에서 −0.004: seed777(CV 0.6432), seed123(CV 0.6417)가 seed42(CV 0.6435)를 희석. 같은 아키텍처 3모델 평균이 오히려 최고 모델을 끌어내리는 현상.
+
+**config.py 경로 버그 수정**
+
+```python
+# 이전: 상대경로 → cwd 의존
+DATA_DIR = Path("data")
+OUTPUT_DIR = Path("dev/experiments/outputs")
+
+# 수정: __file__ 기준 절대경로
+_EXP_DIR = Path(__file__).resolve().parent
+_ROOT    = _EXP_DIR.parent.parent
+DATA_DIR  = _ROOT / "data"
+OUTPUT_DIR = _EXP_DIR / "outputs"
+```
+
+어느 디렉토리에서 실행해도 정상 동작.
+
+---
+
+### 다음 실험 계획 (Phase 9)
+
+**목표: LB 0.71**
+
+수치 분석:
+```
+Oracle ceiling (54-cand): 75.78%
+현재 OOF: 0.6474 (3-seed)
+0.71 LB ≈ OOF 0.685 필요 → 갭 +0.038
+
+A (28.0%) × 0.8795 = 0.2463  ← 이미 양호
+B (47.8%) × 0.8308 = 0.3971  ← 최대 레버
+C (24.2%) × 0.0012 = 0.0003  ← 구조 한계
+```
+
+**Phase 9-1 — C-group 후보 확장 (oracle ceiling 돌파)**
+
+C-group 갭 분석:
+| 파라미터 | 현재 커버리지 | C-group p95 | 초과 비율 |
+|---|---|---|---|
+| `\|perp\|` | ≤ 0.60 | 1.03 | 16.1% → 약 390샘플 |
+| `par` | [0, 1.20] | p5=-0.37, p95=1.29 | 21.2% → 약 514샘플 |
+
+추가 후보:
+- `latency_s030/s040/s050`: time_scale 극단 축소 → par→0 방향 (급감속/정지)
+- `turn_p090/n090`: |perp|=0.90 (날카로운 회전)
+
+이론적 최대 이득: 390샘플(3.9%) × 0.85 = **+0.033 OOF**
+
+**Phase 9-2 — entropy penalty (B-group 선택 정확도)**
+
+```python
+# train.py에 추가
+H    = -(F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1)).sum(-1).mean()
+loss = loss + ENTROPY_WEIGHT * H   # ENTROPY_WEIGHT=0.02
+```
+
+logit이 날카로워짐 → oracle rank 17.6 → 목표 ≤ 8 → Oracle in Top-5 38% → 목표 ≥ 55%
+
+예상 효과: B-group hit 0.831 → 0.870 → OOF **+0.019**
 
 **단계별 목표**
 
-| 단계 | 목표 OOF | 목표 LB | 조건 |
-|---|---:|---:|---|
-| Phase 8 (oracle margin) | ≥ 0.655 | ≥ 0.675 | Oracle in Top-5 ≥ 50% |
-| Phase 9 (2-seed) | ≥ 0.660 | ≥ 0.680 | seed42 OOF ≥ 0.655 |
-| Phase 10 (oracle 개선) | ≥ 0.665 | ≥ 0.690 | eff ≥ 88% |
-| 최종 목표 | ≥ 0.677 | **≥ 0.710** | eff ≥ 93.5% |
+| 단계 | 내용 | 예상 OOF | 예상 LB |
+|---|---|---:|---:|
+| 현재 | 54-cand + SA, 3-seed | 0.6474 | 0.6672 |
+| Phase 9-1 | C-group 후보 확장 (~56-58개) | +0.017 | ~0.685 |
+| Phase 9-2 | entropy penalty + 재학습 | +0.015 | ~0.695 |
+| 3-seed 앙상블 | 재훈련 3개 seed | +0.005 | ~**0.710** |
+
+```bash
+# Phase 9 실행 순서
+python dev/experiments/train.py --seed 42   # 새 candidates + entropy penalty
+python dev/experiments/analyze.py --seed 42  # oracle ceiling + B/C group 확인
+# (통과 시) seed 777, 123 재훈련
+python dev/experiments/predict.py --seeds 42 777 123 --temp 2.0
+```
