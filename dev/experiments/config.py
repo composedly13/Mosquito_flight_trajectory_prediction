@@ -59,16 +59,12 @@ B_GROUP_WEIGHT  = 0.0
 # Entropy Penalty weight — Phase 9 실험: oracle rank 17.6→24.7 역효과 확인 → 0.0 고정
 ENTROPY_WEIGHT  = 0.0
 
-# Family Classifier weight (Phase 10 2-stage 구조)
-# Stage 1: CLS → 6 family 분류 (auxiliary CE loss)
-# Stage 2: family-boosted logits → candidate ranking
-FAMILY_WEIGHT   = 0.5
-
-# Hit-aware BCE Loss
-# 목적: oracle(1cm 이내) = 1, 나머지 = 0 이진 분류 → soft-CE보다 명확한 gradient
-# pos_weight: oracle 후보(~2개) vs 비-oracle(~50개) 클래스 불균형 보정
-# Phase 10 도입: soft-CE 대체 → selector가 직접 R-Hit@1cm 신호 학습
-BCE_POS_WEIGHT  = 5.0
+# Phase 11 Step 2: Auxiliary Regression Head
+# CLS → rough position 예측 → CLS 표현이 "어디로 갈지" 인코딩 강제
+# → cross-attention이 올바른 방향 후보에 집중 → oracle rank 개선
+# loss_reg = smooth_l1( (p0 + rough_Δ) / R_HIT_THRESHOLD, true / R_HIT_THRESHOLD )
+# beta=1.0 (정규화 공간에서 1cm = transition point)
+REG_WEIGHT = 0.5   # soft-CE(~3.0) 대비 reg 기여 ~0.5-2.0 (에러 1-4cm 기준)
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일

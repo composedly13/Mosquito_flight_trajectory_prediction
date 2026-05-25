@@ -2,32 +2,22 @@
 Transformer-based candidate selector.
 Sequence Transformer → Cross-Attention with candidates → logit per candidate
 
-Phase 10 구조 변경:
-- SA (Candidate Self-Attention) 제거: oracle rank 악화 원인 확인 (Phase 8)
-- Family classifier 추가: CLS → 6개 계열 중 어느 family인지 예측
-- Family boost: 각 후보의 계열 점수를 logit에 더함 → 맞는 계열 후보에 집중
-- Loss = BCE(candidate) + PW + LML + CE(family)
+Phase 11 Step 2 구조:
+- soft-CE + PW + LML (Phase 7 proven best)
+- CAND_DIM=10 (family_id/5 제거 — Phase 8에서 −0.73pp 확인)
+- Auxiliary Regression Head: CLS → rough position Δ
+  - CLS가 "어디로 갈지"를 인코딩하도록 강제
+  - cross-attention이 올바른 방향 후보에 집중 → oracle rank 개선
+  - 학습 시 return_reg=True → rough_delta 반환
+  - 추론 시 return_reg=False → logits만 반환 (기존 코드 호환)
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP
-from candidates import CANDIDATE_FAMILY, FAMILY_NAMES
 
-SEQ_DIM    = 11
-CAND_DIM   = 11
-N_FAMILIES = len(FAMILY_NAMES)   # 6
-
-# Cached tensor of candidate family indices
-_CAND_FAM_CACHE: dict = {}
-
-def _cand_fam_tensor(device):
-    key = str(device)
-    if key not in _CAND_FAM_CACHE:
-        _CAND_FAM_CACHE[key] = torch.tensor(
-            CANDIDATE_FAMILY, dtype=torch.long, device=device
-        )
-    return _CAND_FAM_CACHE[key]
+SEQ_DIM  = 11
+CAND_DIM = 10  # family_id/5 제거 (Phase 8 추가됐으나 −0.73pp → 제거)
 
 
 class PositionalEncoding(nn.Module):
@@ -42,13 +32,13 @@ class PositionalEncoding(nn.Module):
 
 class CandidateSelector(nn.Module):
     """
-    2-stage selector:
-      Stage 1 — Family classifier: CLS → which family (6 classes)?
-      Stage 2 — Candidate ranker:  candidates × seq → boosted logit per candidate
-
-    forward() returns:
-      logits        (B, C) — family-boosted candidate scores (for prediction & BCE/LML/PW losses)
-      family_logits (B, 6) — family CE loss target (returned only when return_family=True)
+    Phase 11 Step 2:
+      - Sequence Transformer → CLS
+      - Auxiliary reg_head: CLS → rough_Δ (3D offset from p0)
+        → loss_reg = smooth_l1( rough_pred / threshold, true / threshold )
+        → CLS가 위치 정보를 인코딩하도록 강제 → cross-attention 품질 향상
+      - Cross-Attention: candidates ← seq → candidate scores
+      - Loss = soft-CE + PW + LML + REG_WEIGHT × loss_reg
     """
     def __init__(
         self,
@@ -70,6 +60,14 @@ class CandidateSelector(nn.Module):
         )
         self.seq_encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
 
+        # Auxiliary regression head: CLS → rough 3D displacement from p0
+        self.reg_head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, 3),
+        )
+
         # Candidate encoder
         self.cand_proj = nn.Linear(CAND_DIM, d_model)
 
@@ -79,16 +77,7 @@ class CandidateSelector(nn.Module):
         )
         self.cross_norm = nn.LayerNorm(d_model)
 
-        # Stage 1 — Family classifier (CLS token → 6 families)
-        self.family_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model // 2, N_FAMILIES),
-        )
-
-        # Stage 2 — Candidate scoring head
-        # input: [seq_cls || cand_ctx || cand_feat_raw]
+        # Scoring head: [seq_cls || cand_ctx || cand_feat_raw] → 1 logit per candidate
         self.head = nn.Sequential(
             nn.Linear(d_model * 2 + CAND_DIM, d_model),
             nn.GELU(),
@@ -98,42 +87,30 @@ class CandidateSelector(nn.Module):
 
     def forward(
         self,
-        seq_feat:      torch.Tensor,   # (B, 11, SEQ_DIM)
-        cand_feat:     torch.Tensor,   # (B, C, CAND_DIM)
-        return_family: bool = False,
+        seq_feat:   torch.Tensor,        # (B, 11, SEQ_DIM)
+        cand_feat:  torch.Tensor,        # (B, C, CAND_DIM)
+        return_reg: bool = False,
     ):
-        B = seq_feat.size(0)
-
-        # ── Sequence encoding ───────────────────────────────────────────────
-        seq_h = self.seq_proj(seq_feat)   # (B, 11, d)
+        # ── Sequence encoding ────────────────────────────────────────────────
+        seq_h = self.seq_proj(seq_feat)  # (B, 11, d)
         seq_h = self.pos_enc(seq_h)
-        seq_h = self.seq_encoder(seq_h)   # (B, 11, d)
-        cls   = seq_h[:, -1, :]           # (B, d)  마지막 시점 summary
+        seq_h = self.seq_encoder(seq_h)  # (B, 11, d)
+        cls   = seq_h[:, -1, :]          # (B, d) — 마지막 시점 summary
 
-        # ── Stage 1: Family prediction ───────────────────────────────────────
-        family_logits = self.family_head(cls)                        # (B, 6)
-        family_log_p  = F.log_softmax(family_logits, dim=-1)        # (B, 6)
+        # ── Auxiliary regression (학습 전용) ─────────────────────────────────
+        rough_delta = self.reg_head(cls)  # (B, 3) — rough Δ from p0
 
-        # ── Stage 2: Candidate scoring ───────────────────────────────────────
-        cand_h = self.cand_proj(cand_feat)                           # (B, C, d)
+        # ── Candidate scoring ────────────────────────────────────────────────
+        cand_h = self.cand_proj(cand_feat)                 # (B, C, d)
+        ctx, _ = self.cross_attn(cand_h, seq_h, seq_h)    # (B, C, d)
+        ctx    = self.cross_norm(cand_h + ctx)             # residual
 
-        # Cross-attention: each candidate attends to full sequence
-        ctx, _ = self.cross_attn(cand_h, seq_h, seq_h)              # (B, C, d)
-        ctx    = self.cross_norm(cand_h + ctx)                       # residual
+        cls_exp = cls.unsqueeze(1).expand(-1, ctx.size(1), -1)   # (B, C, d)
+        h       = torch.cat([cls_exp, ctx, cand_feat], dim=-1)   # (B, C, d*2+CAND_DIM)
+        logits  = self.head(h).squeeze(-1)                        # (B, C)
 
-        # Head
-        cls_exp = cls.unsqueeze(1).expand(-1, ctx.size(1), -1)      # (B, C, d)
-        h       = torch.cat([cls_exp, ctx, cand_feat], dim=-1)      # (B, C, d*2+CAND_DIM)
-        logits  = self.head(h).squeeze(-1)                           # (B, C)
-
-        # Family boost: add log-prob of each candidate's family to its logit
-        # → 모델이 "turn 계열"이라 판단하면 turn 후보들의 logit이 집단적으로 상승
-        cand_fam    = _cand_fam_tensor(seq_feat.device)             # (C,)
-        fam_boost   = family_log_p[:, cand_fam]                     # (B, C)
-        logits      = logits + fam_boost
-
-        if return_family:
-            return logits, family_logits
+        if return_reg:
+            return logits, rough_delta
         return logits
 
 

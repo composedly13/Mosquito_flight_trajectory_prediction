@@ -8,13 +8,13 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, BCE_POS_WEIGHT, FAMILY_WEIGHT
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, REG_WEIGHT
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
 )
 from model import CandidateSelector, soft_labels, selector_predict
-from candidates import N_CANDIDATES, CANDIDATE_FAMILY, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
+from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
 
 
 def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
@@ -25,47 +25,9 @@ def fold_id(sample_id: str, n_folds: int = N_FOLDS) -> int:
     return int(hashlib.md5(sample_id.encode()).hexdigest()[:8], 16) % n_folds
 
 
-_CAND_FAM_CACHE: dict = {}
-
-def _cand_fam_tensor(device):
-    key = str(device)
-    if key not in _CAND_FAM_CACHE:
-        _CAND_FAM_CACHE[key] = torch.tensor(
-            CANDIDATE_FAMILY, dtype=torch.long, device=device
-        )
-    return _CAND_FAM_CACHE[key]
-
-
-def family_ce_loss(family_logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
-    """
-    Stage 1 auxiliary loss: oracle 후보의 family를 맞추도록 CE loss.
-    C-group (oracle 없음) 샘플은 ignore (-100).
-    """
-    dists        = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
-    oracle_idx   = dists.argmin(dim=-1)                            # (B,)
-    oracle_dist  = dists.min(dim=-1).values                        # (B,)
-
-    cand_fam     = _cand_fam_tensor(cands.device)                  # (C,)
-    oracle_fam   = cand_fam[oracle_idx].clone()                    # (B,)
-    oracle_fam[oracle_dist > R_HIT_THRESHOLD] = -100               # C-group 제외
-
-    return F.cross_entropy(family_logits, oracle_fam, ignore_index=-100)
-
-
-def hit_aware_bce_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
-    """
-    Binary CE: oracle candidates (within R_HIT_THRESHOLD) = 1, others = 0.
-    C-group samples (no oracle candidate within 1cm) are excluded (loss=0).
-    pos_weight: oracle 클래스 불균형 보정 (~2 oracle vs ~50 non-oracle per sample).
-    """
-    dists      = torch.norm(cands - true.unsqueeze(1), dim=-1)     # (B, C)
-    targets    = (dists <= R_HIT_THRESHOLD).float()                 # (B, C) binary
-    has_oracle = targets.any(dim=1, keepdim=True).float()           # (B, 1) C-group 제외
-    pw         = torch.tensor(BCE_POS_WEIGHT, device=logits.device, dtype=logits.dtype)
-    loss       = F.binary_cross_entropy_with_logits(
-        logits, targets, pos_weight=pw, reduction='none'
-    )                                                               # (B, C)
-    return (loss * has_oracle).mean()
+def soft_ce_loss(logits: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
+    """Soft cross-entropy: 거리 기반 soft label 분포와 CE."""
+    return -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
 
 def pairwise_loss(logits: torch.Tensor, soft: torch.Tensor, margin: float = 0.12) -> torch.Tensor:
@@ -157,19 +119,25 @@ def train_fold(
             seq_f  = make_seq_features_gpu(coords_b)
             cand_f = make_cand_features_gpu(coords_b, cands)
 
-            logits, fam_logits = model(seq_f, cand_f, return_family=True)  # (B,C), (B,6)
-            soft   = soft_labels(cands, true)                    # (B, C) — pairwise용 유지
+            logits, rough_delta = model(seq_f, cand_f, return_reg=True)  # (B,C), (B,3)
+            soft = soft_labels(cands, true)                               # (B, C)
 
-            # Phase 10: BCE(candidate) + family CE(stage1) + PW + LML
-            loss_bce  = hit_aware_bce_loss(logits, cands, true)
-            loss_pair = pairwise_loss(logits, soft)
-            loss      = loss_bce + PAIRWISE_WEIGHT * loss_pair
+            # Phase 11 Step 2: soft-CE + PW + LML + REG (auxiliary regression)
+            loss = soft_ce_loss(logits, soft) + PAIRWISE_WEIGHT * pairwise_loss(logits, soft)
             if LISTMLE_WEIGHT > 0:
                 loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
             if B_GROUP_WEIGHT > 0:
                 loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
-            if FAMILY_WEIGHT > 0:
-                loss = loss + FAMILY_WEIGHT * family_ce_loss(fam_logits, cands, true)
+            if REG_WEIGHT > 0:
+                p0       = coords_b[:, 10]                      # (B, 3) last known position
+                rough_pos = p0 + rough_delta                    # (B, 3) rough prediction
+                # smooth_l1 in threshold-normalized space: error in units of 1cm
+                loss_reg = F.smooth_l1_loss(
+                    rough_pos / R_HIT_THRESHOLD,
+                    true      / R_HIT_THRESHOLD,
+                    beta=1.0,
+                )
+                loss = loss + REG_WEIGHT * loss_reg
 
             optimizer.zero_grad()
             loss.backward()
