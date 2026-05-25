@@ -283,19 +283,20 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **60개** (54-cand + near_stop/reverse_mild/latency_s040/s050/turn_p090/n090 추가) |
-| Cand features | **CAND_DIM=11** (family_id/5 추가 — 후보 계열 타입 피처) |
+| Candidates | **52개** (Phase 7 기준 — Phase 9 극단 6개 제거) |
+| Cand features | **CAND_DIM=11** (family_id/5 포함) |
 | Augmentation | **yaw-only** |
-| Selector | Transformer + Cross-Attention + **Candidate Self-Attention** (d_model=128, 3 layers) |
+| Selector | Transformer + Cross-Attention (d_model=128, 3 layers) — SA 없음 |
 | Seq features | **11개** (SEQ_DIM=11) |
-| Loss | **CE + PW×0.25 + LML×0.05** (ENTROPY_WEIGHT=0.0, entropy penalty 실험 실패) |
-| Prediction | **Top-10** weighted average, temp=2.0 |
+| Loss | **BCE + PW×0.25 + LML×0.05 + CE_family×0.5** (Phase 10 — 실패) |
+| Prediction | **Top-10** weighted average, temp=0.7 |
 | Boundary MLP | **완전 제거** |
-| TTA | **효과 없음** (TTA×8 → +0.0001pp) |
-| OOF (3-seed, Phase 9) | **0.6445** (seeds 42+777+123, 60-cand, entropy 역효과 포함) |
-| Oracle ceiling | **76.75%** (60-cand 기준, Phase 8 75.78% 대비 +0.97pp) |
-| Selector efficiency | **84.0%** |
-| LB (best) | **0.6712** (Phase 7/8 seed42 단독) |
+| TTA | **효과 없음** (TTA×8 → ±0.00pp) |
+| OOF (seed42, Phase 10) | **0.6438** (Phase 7 0.6510 대비 −0.72pp — BCE 역효과) |
+| Oracle ceiling | **75.41%** (52-cand) |
+| Selector efficiency | **85.4%** |
+| Oracle rank mean | **21.1** (Phase 7 13.3 대비 악화 — BCE 원인) |
+| LB (best) | **0.6716** (Phase 5, 2-seed 42+777, β=0.0 selector-only) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
@@ -355,6 +356,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Phase 9: 60-cand + entropy penalty (seed777) | 60 | 0.6360 | 76.75% | 82.9% | 0.6361 | |
 | Phase 9: 60-cand + entropy penalty (seed123) | 60 | 0.6393 | 76.75% | 83.3% | 0.6393 | |
 | **Phase 9: 3-seed 앙상블 (42+777+123)** | **60** | — | **76.75%** | **84.0%** | **0.6445** | OOF −0.29pp vs P8 — entropy penalty 제거 필요 |
+| **Phase 10: 52-cand + BCE + family cls (seed42)** | **52** | 0.6437 ± 0.0060 | 75.41% | 85.4% | **0.6438** | ❌ oracle rank 21.1 (Phase 7 13.3 대비 악화) — BCE가 ranking 파괴 |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -376,6 +378,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 G2: Smart 50 + LML=0.10 | **13.2** | 43.6% | 30.6% | 46.4% | 23.0% | rank 개선 但 OOF +0.02pp, 단일 seed 상한 도달 |
 | Phase 7-1: 52-cand (original + latency_s075/080) | 13.3 | 39.2% | 32.1% | **42.6%** | **22.6%** | C-group 25.1%→22.6% (-2.5pp), B-group 최초 진입 병목 |
 | Phase 7-2: 52-cand + focal×2.0 (B-group) | **16.4** | — | — | 46.6% | — | ❌ oracle rank 악화 — 불안정한 hard mining |
+| **Phase 10: 52-cand + BCE + family cls** | **21.1** | 27.6% | **20.9%** | **54.5%** | **24.6%** | ❌ BCE가 oracle rank 13.3→21.1로 파괴 — soft-CE 복귀 필요 |
 
 ---
 
@@ -1797,42 +1800,163 @@ if ENTROPY_WEIGHT > 0:
 - ❌ Entropy penalty: oracle rank 17.6 → 24.7로 악화 — 제거 필요
 - ❌ 3-seed OOF: 0.6474 → 0.6445 (-0.29pp) — Phase 8 대비 퇴행
 
-**다음 방향 (Phase 10)**
+**다음 방향 (Phase 10 → 실제 실행)**
 
-- `ENTROPY_WEIGHT = 0.0` (제거)
-- 60-cand 유지
-- 3-seed 재훈련 → oracle rank 회복 + oracle ceiling(76.75%) 활용
+- `ENTROPY_WEIGHT = 0.0` + 52-cand 복귀 + 2-stage family classifier 도입
+- 실제 결과: BCE loss 역효과 확인 → Phase 11 진입
 
 ---
 
-### 다음 실험 계획 (Phase 10)
+### 2026-05-26
+
+**[Phase 10: 52-cand + Hit-aware BCE + Family Classifier — 실패]**
+
+**구현 내용**
+
+| 항목 | 변경 |
+|---|---|
+| candidates.py | 60-cand → 52-cand 복귀 (latency_s040/050, near_stop, reverse_mild, turn_p090/n090 제거) |
+| config.py | `FAMILY_WEIGHT=0.5`, `BCE_POS_WEIGHT=5.0` 추가 |
+| model.py | SA 제거 → 2-stage CandidateSelector (Stage1: CLS→family, Stage2: family-boosted logits) |
+| train.py | `hit_aware_bce_loss` (soft-CE 대체), `family_ce_loss` 추가 |
+
+**Loss 구성**: `BCE + 0.25×PW + 0.05×LML + 0.5×CE_family`
+
+- BCE: oracle(1cm 이내)=1, 나머지=0 이진 분류
+- Family CE: CLS → 6개 계열(base/acc/frenet/turn/jerk/latency) 분류 auxiliary loss
+- Family boost: 각 후보의 family log-prob을 logit에 더함
+
+**학습 결과 (seed 42)**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6530 |
+| 2 | 0.6429 |
+| 3 | 0.6387 |
+| 4 | 0.6475 |
+| 5 | 0.6365 |
+| **CV mean** | **0.6437 ± 0.0060** |
+| **OOF** | **0.6438** |
+
+**analyze.py 결과 (seed 42)**
+
+| 지표 | Phase 7 (52-cand, soft-CE) | Phase 10 (BCE+family) | 변화 |
+|---|---:|---:|---:|
+| OOF | **0.6510** | 0.6438 | **−0.72pp ❌** |
+| Oracle ceiling | 75.41% | 75.41% | = |
+| Selector efficiency | **86.3%** | 85.4% | −0.9pp |
+| Oracle rank mean | **13.3** | **21.1** | **+7.8 ❌** |
+| Oracle in Top-5 | 39.2% | **27.6%** | **−11.6pp ❌** |
+| A-group (oracle∩top-5) | 32.1% | **20.9%** | **−11.2pp ❌** |
+| B-group | **42.6%** | **54.5%** | **+11.9pp ❌** |
+| C-group | 22.6% | 24.6% | +2.0pp ❌ |
+
+**C-group 상세 분석 (analyze 4b)**
+
+```
+C-group: 2459개 (24.6%)
+nearest-cand dist: mean=2.65cm  p50=1.71  p75=3.22  p90=5.66
+
+True label Frenet 분포:
+  par : mean=0.77  std=0.67  p5=-0.36  p95=1.29
+  perp: mean=0.15  std=0.59  |p75|=0.45  |p95|=1.02
+  jerk: mean=0.48  p75=0.55  p95=1.70
+
+현재 커버리지: par=[0,1.20]  |perp|≤0.60  |jerk|≤0.50
+C-group 초과: |perp|>0.60 → 15.8%  /  par 범위 밖 → 20.9%
+
+C-group nearest 후보:
+  [21] latency_s075   620 (25.2%)  ← 극감속 클러스터
+  [45] jerk_xl_pos    353 (14.4%)  ─┐
+  [41] turn_p060      319 (13.0%)  ─┤ 합산 72.3% = 세 클러스터
+  [46] jerk_xl_neg    264 (10.7%)  ─┤
+  [42] turn_n060      221 ( 9.0%)  ─┘
+```
+
+**실패 원인 분석**
+
+| 의도 | 현실 |
+|---|---|
+| BCE(oracle=1/0) → 명확한 gradient → oracle rank 개선 | ranking 정보 손실 → oracle rank 13.3→21.1로 폭락 |
+| Family classifier → 계열 맞는 후보에 집중 | Family boost가 오히려 잘못된 계열로 logit 편향 |
+| soft-CE 대비 직접적인 R-Hit@1cm 최적화 | soft-CE가 더 풍부한 거리 기반 gradient 제공 |
+
+**결론**
+
+- ❌ BCE loss: soft-CE 대비 oracle rank 대폭 악화 (13.3→21.1)
+- ❌ Family classifier: 효과 없음 (Phase 8 SA+family feature와 OOF 동일 수준 0.6435≈0.6438)
+- **핵심 교훈**: C-group 개선을 위한 구조 변경보다 **B-group 개선(oracle ranking)** 이 우선
+- **근본 문제**: B-group 54.5% — oracle이 있는데 rank 21위에 묻혀 있음
+
+---
+
+### 다음 실험 계획 (Phase 11)
 
 **목표: LB 0.71**
 
-**현재 상황 (Phase 9 이후)**
+**현황 (Phase 10 이후)**
 
 | 항목 | 값 |
 |---|---|
-| Oracle ceiling | 76.75% (60-cand) |
-| 3-seed OOF | 0.6445 |
-| 70% 달성 필요 efficiency | ≥ 91.2% |
-| 현재 efficiency | 84.0% → 갭 7.2pp |
+| Oracle ceiling | 75.41% (52-cand) |
+| Best OOF | 0.6510 (Phase 7, soft-CE) |
+| Best LB | 0.6716 (Phase 5, 2-seed 42+777) |
+| Oracle rank mean | 21.1 (Phase 10) → 13.3 (Phase 7) → 목표 < 7 |
+| B-group 비율 | 54.5% → Phase 7 42.6% → 목표 < 30% |
+| 0.71 달성 조건 | Oracle×Efficiency ≥ 0.71 (예: 0.80×0.89 또는 0.82×0.87) |
 
-**Phase 10 전략 — 동시 실행**
+**C-group 클러스터 구조**
 
-| 작업 | 내용 | 기대 효과 |
+```
+극감속 (25.2%): latency_s075 nearest → time_scale < 0.75 필요
+극jerk  (25.1%): jerk_xl nearest     → |jerk| > 0.50 필요
+극회전  (22.0%): turn_p/n060 nearest → |perp| > 0.60 필요
+```
+
+**Phase 11 전략**
+
+| 단계 | 작업 | 기대 효과 |
 |---|---|---|
-| `ENTROPY_WEIGHT = 0.0` | entropy penalty 제거 (역효과 확인) | oracle rank 24.7 → ~17 회복 |
-| 60-cand 유지 + C-group 후보 보강 | oracle ceiling 76.75%+ 유지 | Oracle ↑, C-group 감소 |
-| `predict.py temp=2.0` 고정 | analyze에서 +1pp 확인된 무료 이득 | +1pp |
-| 3-seed 재훈련 | 60-cand + 순수 CE+PW+LML=0.05 | OOF ~0.655+ 목표 |
+| **Step 1** | soft-CE 복귀 (BCE 제거, family 제거) | oracle rank 21.1→13.3 회복 (+OOF ~0.651) |
+| **Step 2** | Auxiliary Regression Head | B-group 개선 (oracle rank 13→7 목표) |
+| **Step 3** | C-group 타겟 후보 추가 | oracle ceiling 75.41%→~80% 목표 |
+| **Step 4** | 3-seed 앙상블 | +~1pp LB |
+
+**Step 2 — Auxiliary Regression Head (핵심 아이디어)**
+
+```
+CLS token → reg_head → rough_position (Δx, Δy, Δz)
+학습: Loss += λ_reg × Huber(p0 + rough_pred, true_label)
+추론: selector logit이 rough_pred 근처 후보에 자연스럽게 집중
+```
+
+CLS가 "어디쯤 있겠다"를 먼저 추정하면 cross-attention이 해당 방향 후보에 집중.
+Faster R-CNN의 RPN과 유사한 구조 (rough estimate → refined selection).
+
+**Step 3 — C-group 후보 설계 원칙 (Phase 8/9 실패 교훈)**
+
+이전 실패 패턴: 극단 후보 추가 → oracle↑ but efficiency↓ (selector 혼란)
+새 원칙: **Step 2(auxiliary reg)로 selector 안정화 후** 후보 추가
+
+```
+극감속 클러스터: latency_s060 (time_scale=0.60) — Phase 8에서 oracle +0.37pp 확인
+극jerk 클러스터: jerk_xxl_pos/neg (jerk=0.70)
+극회전 클러스터: turn_p075/n075 (perp=±0.75)
+```
 
 ```bash
-# Phase 10 실행 순서
-# 1. config.py: ENTROPY_WEIGHT = 0.0
+# Phase 11 실행 순서
+# Step 1: config 복귀 → soft-CE
+python dev/experiments/train.py --seed 42
+python dev/experiments/analyze.py --seed 42  # oracle rank 회복 확인
+
+# Step 2: auxiliary reg head 추가 후 재학습
+python dev/experiments/train.py --seed 42
+python dev/experiments/analyze.py --seed 42  # oracle rank < 10 목표
+
+# Step 3: C-group 후보 추가 (Step 2 성공 시)
 python dev/experiments/train.py --seed 42
 python dev/experiments/train.py --seed 777
 python dev/experiments/train.py --seed 123
-python dev/experiments/analyze.py --seeds 42 777 123
 python dev/experiments/predict.py --seeds 42 777 123
 ```
