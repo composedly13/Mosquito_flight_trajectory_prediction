@@ -56,12 +56,15 @@ LISTMLE_WEIGHT  = 0.05    # 원래 50-cand + LML=0.05 (multi-seed run: 42+123+77
 # 현재: 0.0 (CE+PW+LML 순수 config 복귀)
 B_GROUP_WEIGHT  = 0.0
 
-# Entropy Penalty weight
-# 목적: selector logit을 날카롭게 만들어 oracle rank 개선 → B-group 선택 정확도 향상
-# entropy H = -Σ p log p (uniform → max, peaked → 0)
-# loss += ENTROPY_WEIGHT × H → 높은 엔트로피를 penalize → logit 집중
-# 현재 H ≈ 0.986 (54-cand, 구조적 최대치) → 날카로운 logit 유도로 oracle rank 개선 기대
-ENTROPY_WEIGHT  = 0.02
+# Entropy Penalty weight — Phase 9 실험: oracle rank 17.6→24.7 역효과 확인 → 0.0 고정
+ENTROPY_WEIGHT  = 0.0
+
+# Phase 11 Step 2: Auxiliary Regression Head
+# CLS → rough position 예측 → CLS 표현이 "어디로 갈지" 인코딩 강제
+# → cross-attention이 올바른 방향 후보에 집중 → oracle rank 개선
+# loss_reg = smooth_l1( (p0 + rough_Δ) / R_HIT_THRESHOLD, true / R_HIT_THRESHOLD )
+# beta=1.0 (정규화 공간에서 1cm = transition point)
+REG_WEIGHT = 0.5   # soft-CE(~3.0) 대비 reg 기여 ~0.5-2.0 (에러 1-4cm 기준)
 
 # Prediction
 TOPK = 10   # train / predict / analyze 통일

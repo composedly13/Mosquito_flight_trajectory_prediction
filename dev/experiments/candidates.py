@@ -54,9 +54,8 @@ CANDIDATES = [
     CandidateSpec("jerk_small_neg",    1.98,  0.80, -0.05, jerk=-0.08),
 
     # Latency family
-    # latency_s075가 C-group nearest 25.2% → s060/s065로 더 강한 보정 커버
-    CandidateSpec("latency_s060",      1.98,  0.96, -0.08, time_scale=0.60),
-    CandidateSpec("latency_s065",      1.98,  0.96, -0.08, time_scale=0.65),
+    # latency_s060/s065: Phase 8 + Phase 11 Step 3 양쪽 실험에서 OOF 악화 확인
+    # → family_id 오염 없이도 극단 감속 후보가 selector 혼란 유발 → 영구 제거
     CandidateSpec("latency_s075",      1.98,  0.96, -0.08, time_scale=0.75),
     CandidateSpec("latency_s080",      1.98,  0.96, -0.08, time_scale=0.80),
     CandidateSpec("latency_s085",      1.98,  0.96, -0.08, time_scale=0.85),
@@ -99,29 +98,21 @@ CANDIDATES = [
     CandidateSpec("tj_nn20",           1.98,  0.85, -0.20, jerk=-0.20),
     CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
 
-    # Phase 9: C-group 확장 — par<0 (급감속/정지/역방향) + |perp|>0.60 (날카로운 회전)
-    # C-group 분석: par=[0,1.20] 범위 밖 21.2%, |perp|>0.60 16.1%
-    # par 축: latency_s060(0.594) 아래 → near_stop(0.20) → reverse_mild(-0.25) 커버
-    CandidateSpec("latency_s050",      1.98,  0.96, -0.08, time_scale=0.50),  # par≈0.495
-    CandidateSpec("latency_s040",      1.98,  0.96, -0.08, time_scale=0.40),  # par≈0.396
-    CandidateSpec("near_stop",         0.40,  0.10,  0.00),                    # par≈0.20 (급감속)
-    CandidateSpec("reverse_mild",     -0.50,  0.00,  0.00),                    # par≈-0.25 (역방향)
-    # perp 축: turn_p060(0.60) 위 → turn_p090(0.90) 커버
-    CandidateSpec("turn_p090",         1.80,  0.40,  0.90),  # 날카로운 우회전
-    CandidateSpec("turn_n090",         1.80,  0.40, -0.90),  # 날카로운 좌회전
-
 ]
 # 60-cand 실험(2026-05-22): jerk_xxl~turn_n100 10개 추가 → oracle +3.4pp, efficiency -4.9pp → 실패
-# 52-cand (2026-05-24): latency_s075/s080 추가 → oracle 75.41%
-# 54-cand (2026-05-24): latency_s060/s065 + SA + family feature → oracle 75.78%
-# 60-cand (Phase 9): +latency_s040/s050, near_stop, reverse_mild, turn_p090/n090 → C-group par/perp 확장
+# 52-cand (2026-05-24 Phase 7): latency_s075/s080 추가 → oracle 75.41%, LB 0.6712 (best)
+# 54-cand (Phase 8): latency_s060/s065 + SA + family feature → oracle 75.78% (OOF -0.75pp)
+# 60-cand (Phase 9): +6개 추가 → oracle 76.75%, but entropy penalty 역효과 → 52-cand 복귀
+# Phase 10: 52-cand + hit-aware BCE loss (selector 개선 집중) → 실패
+# 54-cand (Phase 11 Step 3): latency_s060/s065 재추가 (without family_id) → OOF -0.21pp → 실패
+# 52-cand (Phase 11 Step 2): reg_head + CAND_DIM=10 → OOF 0.6464 ← 현재 best single-seed
 
 N_CANDIDATES = len(CANDIDATES)
 
 FAMILY_NAMES = ["base", "acc", "frenet", "turn", "jerk", "latency"]
 
 def _family_id(name: str) -> int:
-    if name in ("p0_2d1", "near_stop", "reverse_mild"): return 0   # base / extreme velocity
+    if name in ("p0_2d1",): return 0   # base
     if name.startswith("acc_"):       return 1
     if name.startswith("latency"):    return 5
     if "jerk" in name:                return 4
@@ -266,8 +257,6 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
 
     speed_h = speed[:, 0] * horizon  # (N,)
 
-    family_arr = np.array([_family_id(s.name) / 5.0 for s in CANDIDATES])
-
     feats = np.stack([
         cand_par  / (speed_h[:, np.newaxis] + EPS),
         cand_perp / (speed_h[:, np.newaxis] + EPS),
@@ -279,8 +268,7 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
         np.array([s.jerk for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
         np.array([s.time_scale for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
         (acc_par[:, 0, np.newaxis] / (speed[:, 0, np.newaxis] + EPS)).repeat(N_CANDIDATES, axis=1),
-        family_arr[np.newaxis, :].repeat(len(x), axis=0),  # 후보 계열 타입
-    ], axis=2).astype(np.float32)   # (N, C, 11)
+    ], axis=2).astype(np.float32)   # (N, C, 10)
 
     return feats
 
@@ -409,7 +397,7 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
     speed_h   = speed[:, 0] * 2.0                       # (B,)
 
     p = _cand_params_gpu(x.device, x.dtype)                      # (C, 7)
-    d1_a, d2_a, par_a, pe_a, jk_a, ts_a, fam_a = p.unbind(-1)   # (C,) each
+    d1_a, d2_a, par_a, pe_a, jk_a, ts_a, _ = p.unbind(-1)      # (C,) each, ignore family_id
 
     return torch.stack([
         cand_par  / (speed_h[:, None] + EPS),
@@ -422,5 +410,4 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
         jk_a [None].expand(len(x), -1),
         ts_a [None].expand(len(x), -1),
         (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES),
-        fam_a[None].expand(len(x), -1),   # 후보 계열 타입 (base/acc/frenet/turn/jerk/latency)
-    ], dim=-1)  # (B, C, 11)
+    ], dim=-1)  # (B, C, 10)

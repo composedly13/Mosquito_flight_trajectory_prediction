@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, ENTROPY_WEIGHT
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, REG_WEIGHT
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
@@ -23,6 +23,11 @@ def r_hit(pred: np.ndarray, true: np.ndarray) -> float:
 
 def fold_id(sample_id: str, n_folds: int = N_FOLDS) -> int:
     return int(hashlib.md5(sample_id.encode()).hexdigest()[:8], 16) % n_folds
+
+
+def soft_ce_loss(logits: torch.Tensor, soft: torch.Tensor) -> torch.Tensor:
+    """Soft cross-entropy: 거리 기반 soft label 분포와 CE."""
+    return -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
 
 def pairwise_loss(logits: torch.Tensor, soft: torch.Tensor, margin: float = 0.12) -> torch.Tensor:
@@ -114,23 +119,25 @@ def train_fold(
             seq_f  = make_seq_features_gpu(coords_b)
             cand_f = make_cand_features_gpu(coords_b, cands)
 
-            logits = model(seq_f, cand_f)                        # (B, C)
-            soft   = soft_labels(cands, true)                    # (B, C)
+            logits, rough_delta = model(seq_f, cand_f, return_reg=True)  # (B,C), (B,3)
+            soft = soft_labels(cands, true)                               # (B, C)
 
-            loss_ce   = -(soft * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-            loss_pair = pairwise_loss(logits, soft)
-            loss      = loss_ce + PAIRWISE_WEIGHT * loss_pair
+            # Phase 11 Step 2: soft-CE + PW + LML + REG (auxiliary regression)
+            loss = soft_ce_loss(logits, soft) + PAIRWISE_WEIGHT * pairwise_loss(logits, soft)
             if LISTMLE_WEIGHT > 0:
                 loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
             if B_GROUP_WEIGHT > 0:
-                # oracle margin: oracle logit이 top-5 기준선보다 높도록 직접 강제
                 loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
-            if ENTROPY_WEIGHT > 0:
-                # Entropy penalty: 높은 엔트로피(불확실한 logit)를 penalize → 날카로운 logit 유도
-                # H = -Σ p·log(p), normalized ∈ [0,1]. loss += ENTROPY_WEIGHT × H
-                probs = F.softmax(logits, dim=-1)
-                H = -(probs * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-                loss = loss + ENTROPY_WEIGHT * H
+            if REG_WEIGHT > 0:
+                p0       = coords_b[:, 10]                      # (B, 3) last known position
+                rough_pos = p0 + rough_delta                    # (B, 3) rough prediction
+                # smooth_l1 in threshold-normalized space: error in units of 1cm
+                loss_reg = F.smooth_l1_loss(
+                    rough_pos / R_HIT_THRESHOLD,
+                    true      / R_HIT_THRESHOLD,
+                    beta=1.0,
+                )
+                loss = loss + REG_WEIGHT * loss_reg
 
             optimizer.zero_grad()
             loss.backward()

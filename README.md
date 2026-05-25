@@ -283,20 +283,21 @@ python dev/experiments/predict.py --seeds 42 123 777
 
 | 항목 | 현재 설정 |
 |---|---|
-| Candidates | **54개** (52-cand + latency_s060/s065 추가) |
-| Cand features | **CAND_DIM=11** (family_id/5 추가 — 후보 계열 타입 피처) |
+| Candidates | **52개** (Phase 11 기준 — latency_s075/s080 포함, s060/s065 영구 제거) |
+| Cand features | **CAND_DIM=10** (family_id/5 영구 제거 — Phase 8 대비 −0.73pp 확인) |
 | Augmentation | **yaw-only** |
-| Selector | Transformer + Cross-Attention + **Candidate Self-Attention** (d_model=128, 3 layers) |
+| Selector | Transformer + Cross-Attention + **Auxiliary Reg Head** (d_model=128, 3 layers) |
 | Seq features | **11개** (SEQ_DIM=11) |
-| Loss | **CE + PW×0.25 + LML×0.05** (B_GROUP_WEIGHT=0.0, oracle_margin 실험 실패) |
-| Prediction | **Top-10** weighted average, temp=2.0 |
+| Loss | **soft-CE + PW×0.25 + LML×0.05 + smooth_l1_reg×0.5** (Phase 11 Step 2) |
+| Prediction | **Top-10** weighted average, temp=1.0 |
 | Boundary MLP | **완전 제거** |
-| TTA | **효과 없음** (TTA×8 → +0.0001pp) |
-| OOF (3-seed) | **0.6474** (seeds 42+777+123, 15 models) |
-| Oracle ceiling | **75.78%** (54-cand 기준) |
-| Selector efficiency | **85.4%** |
-| LB (best) | **0.6716** (구 아키텍처 seed42 단독) |
-| LB (현재) | **0.6712** (새 아키텍처 seed42 단독) / **0.6672** (3-seed) |
+| TTA | **효과 없음** (TTA×8 → ±0.00pp) |
+| OOF (seed42, Phase 11) | **0.6464** (Phase 7 0.6510 대비 −0.46pp — single seed 기준) |
+| Oracle ceiling | **75.41%** (52-cand) |
+| Selector efficiency | **85.7%** |
+| Oracle rank mean | **15.8** (Phase 7 13.3 대비 소폭 악화) |
+| LB (best) | **0.6716** (Phase 5, 2-seed 42+777, β=0.0 selector-only) |
+| Phase 11 3-seed LB | **0.6692** (42+777+123, −0.24pp vs best) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
 ---
@@ -352,6 +353,14 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Phase 8-5: 54-cand + SA, seed123 | 54 | — | 75.78% | 84.7% | 0.6417 | |
 | **Phase 8 제출: 3-seed (42+777+123), temp=2.0** | 54 | — | 75.78% | **85.4%** | **0.6474** | **LB 0.6672** ❌ single-seed(0.6712) 하회 — seed777/123 variance 희석 |
 | Phase 8 단일 seed42 제출 | 54 | — | 75.78% | 84.9% | 0.6435 | **LB 0.6712** (구 아키텍처 best와 동등) |
+| **Phase 9: 60-cand + entropy penalty (seed42)** | **60** | 0.6341 | **76.75%** | 82.6% | 0.6341 | entropy 역효과: oracle rank 17.6→24.7 ❌ |
+| Phase 9: 60-cand + entropy penalty (seed777) | 60 | 0.6360 | 76.75% | 82.9% | 0.6361 | |
+| Phase 9: 60-cand + entropy penalty (seed123) | 60 | 0.6393 | 76.75% | 83.3% | 0.6393 | |
+| **Phase 9: 3-seed 앙상블 (42+777+123)** | **60** | — | **76.75%** | **84.0%** | **0.6445** | OOF −0.29pp vs P8 — entropy penalty 제거 필요 |
+| **Phase 10: 52-cand + BCE + family cls (seed42)** | **52** | 0.6437 ± 0.0060 | 75.41% | 85.4% | **0.6438** | ❌ oracle rank 21.1 (Phase 7 13.3 대비 악화) — BCE가 ranking 파괴 |
+| **Phase 11 Step 2: soft-CE + reg_head, CAND_DIM=10 (seed42)** | **52** | 0.6464 ± 0.0037 | 75.41% | 85.7% | **0.6464** | family_id 제거 회복 + Auxiliary Reg Head (REG_WEIGHT=0.5) |
+| Phase 11 Step 3: 54-cand + latency_s060/065 (seed42) | 54 | 0.6442 ± 0.0076 | 75.78% | 85.0% | 0.6443 | ❌ OOF −0.21pp — family_id 없어도 극단 감속 후보가 efficiency 저하 → 영구 제거 |
+| **Phase 11: 3-seed 앙상블 (42+777+123), temp=1.0** | **52** | — | 75.41% | — | — | **LB 0.6692** ❌ Phase 7 best(0.6716) 하회 −0.24pp |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -373,6 +382,8 @@ python dev/experiments/predict.py --seeds 42 123 777
 | 실험 G2: Smart 50 + LML=0.10 | **13.2** | 43.6% | 30.6% | 46.4% | 23.0% | rank 개선 但 OOF +0.02pp, 단일 seed 상한 도달 |
 | Phase 7-1: 52-cand (original + latency_s075/080) | 13.3 | 39.2% | 32.1% | **42.6%** | **22.6%** | C-group 25.1%→22.6% (-2.5pp), B-group 최초 진입 병목 |
 | Phase 7-2: 52-cand + focal×2.0 (B-group) | **16.4** | — | — | 46.6% | — | ❌ oracle rank 악화 — 불안정한 hard mining |
+| **Phase 10: 52-cand + BCE + family cls** | **21.1** | 27.6% | **20.9%** | **54.5%** | **24.6%** | ❌ BCE가 oracle rank 13.3→21.1로 파괴 — soft-CE 복귀 필요 |
+| **Phase 11 Step 2: soft-CE + reg_head (CAND_DIM=10)** | **15.8** | 39.1% | 27.5% | 48.0% | 24.6% | oracle rank Phase 7(13.3) 대비 소폭 악화, OOF +0.27pp — reg_head 효과 제한적 |
 
 ---
 
@@ -1728,60 +1739,294 @@ OUTPUT_DIR = _EXP_DIR / "outputs"
 
 ---
 
-### 다음 실험 계획 (Phase 9)
+### 2026-05-24 (3)
 
-**목표: LB 0.71**
+**[Phase 9: 60-cand + Entropy Penalty — 역효과 확인]**
 
-수치 분석:
-```
-Oracle ceiling (54-cand): 75.78%
-현재 OOF: 0.6474 (3-seed)
-0.71 LB ≈ OOF 0.685 필요 → 갭 +0.038
+**목표**: Oracle ceiling 돌파(54→60-cand) + Entropy penalty로 B-group 선택 정확도 개선 → LB 0.71
 
-A (28.0%) × 0.8795 = 0.2463  ← 이미 양호
-B (47.8%) × 0.8308 = 0.3971  ← 최대 레버
-C (24.2%) × 0.0012 = 0.0003  ← 구조 한계
-```
+**작업 1 — 60-cand 확장**
 
-**Phase 9-1 — C-group 후보 확장 (oracle ceiling 돌파)**
+C-group 갭 분석 기반으로 6개 후보 추가 (54→60):
 
-C-group 갭 분석:
-| 파라미터 | 현재 커버리지 | C-group p95 | 초과 비율 |
-|---|---|---|---|
-| `\|perp\|` | ≤ 0.60 | 1.03 | 16.1% → 약 390샘플 |
-| `par` | [0, 1.20] | p5=-0.37, p95=1.29 | 21.2% → 약 514샘플 |
+| 이름 | 파라미터 | 근거 |
+|---|---|---|
+| `latency_s050` | time_scale=0.50, par≈0.495 | 급감속(par→0) 커버 |
+| `latency_s040` | time_scale=0.40, par≈0.396 | 더 강한 급감속 |
+| `near_stop` | d1=0.40, par≈0.20 | 거의 정지 케이스 |
+| `reverse_mild` | d1=−0.50, par≈−0.25 | 역방향 이동 |
+| `turn_p090` | perp=+0.90 | 날카로운 우회전 (|perp| 초과 16.1% 타겟) |
+| `turn_n090` | perp=−0.90 | 날카로운 좌회전 |
 
-추가 후보:
-- `latency_s030/s040/s050`: time_scale 극단 축소 → par→0 방향 (급감속/정지)
-- `turn_p090/n090`: |perp|=0.90 (날카로운 회전)
-
-이론적 최대 이득: 390샘플(3.9%) × 0.85 = **+0.033 OOF**
-
-**Phase 9-2 — entropy penalty (B-group 선택 정확도)**
+**작업 2 — Entropy Penalty (ENTROPY_WEIGHT=0.02)**
 
 ```python
 # train.py에 추가
-H    = -(F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1)).sum(-1).mean()
-loss = loss + ENTROPY_WEIGHT * H   # ENTROPY_WEIGHT=0.02
+if ENTROPY_WEIGHT > 0:
+    probs = F.softmax(logits, dim=-1)
+    H = -(probs * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    loss = loss + ENTROPY_WEIGHT * H
 ```
 
-logit이 날카로워짐 → oracle rank 17.6 → 목표 ≤ 8 → Oracle in Top-5 38% → 목표 ≥ 55%
+목적: H 최소화 → logit 집중 → oracle이 top-5에 들어오도록 강제
 
-예상 효과: B-group hit 0.831 → 0.870 → OOF **+0.019**
+**3-seed 학습 결과**
 
-**단계별 목표**
+| seed | CV mean | OOF | Oracle |
+|---:|---:|---:|---:|
+| 42 | 0.6341 ± 0.0084 | 0.6341 | 76.75% |
+| 777 | 0.6360 ± 0.0100 | 0.6361 | 76.75% |
+| 123 | 0.6393 ± 0.0053 | 0.6393 | 76.75% |
+| **3-seed** | — | **0.6445** | 76.75% |
 
-| 단계 | 내용 | 예상 OOF | 예상 LB |
-|---|---|---:|---:|
-| 현재 | 54-cand + SA, 3-seed | 0.6474 | 0.6672 |
-| Phase 9-1 | C-group 후보 확장 (~56-58개) | +0.017 | ~0.685 |
-| Phase 9-2 | entropy penalty + 재학습 | +0.015 | ~0.695 |
-| 3-seed 앙상블 | 재훈련 3개 seed | +0.005 | ~**0.710** |
+**analyze.py 결과 (3-seed)**
+
+| 지표 | Phase 8 (54-cand) | Phase 9 (60-cand+entropy) | 변화 |
+|---|---:|---:|---:|
+| 3-seed OOF | **0.6474** | 0.6445 | **−0.29pp ❌** |
+| Oracle ceiling | 75.78% | **76.75%** | +0.97pp ✅ |
+| Oracle rank mean | 17.6 | **24.7** | **+7.1 ❌** |
+| A-group (oracle in top-5) | 28.0% | **16.9%** | **−11.1pp ❌** |
+| B-group | 47.8% | **59.8%** | **+12.0pp ❌** |
+| C-group | 24.2% | **23.2%** | −1.0pp ✅ |
+| Entropy H (mean) | 0.986 | **0.986** | 변화 없음 ❌ |
+
+**실패 원인 분석 — Entropy Penalty 역효과**
+
+| 의도 | 현실 |
+|---|---|
+| H 최소화 → logit 집중 → oracle 상위 랭킹 | 모델이 CE + 엔트로피 동시 최소화를 위해 "자주 oracle인" 후보에 무조건 집중 |
+| 샘플별 oracle 식별 강화 | `jerk_xl_pos/neg`, `turn_p/n090` 등 인기 후보에 항상 high logit 부여 → oracle이 아닌 샘플에서 rank 폭락 |
+| ENTROPY_WEIGHT=0.02로 구조적 한계 돌파 | H ≈ 0.986 그대로 — 60-cand 환경에서 0.02 가중치는 CE loss에 묻혀 무효 |
+
+**결론**
+
+- ✅ Oracle ceiling: 75.78% → 76.75% (+0.97pp) — 60-cand 자체는 유효
+- ❌ Entropy penalty: oracle rank 17.6 → 24.7로 악화 — 제거 필요
+- ❌ 3-seed OOF: 0.6474 → 0.6445 (-0.29pp) — Phase 8 대비 퇴행
+
+**다음 방향 (Phase 10 → 실제 실행)**
+
+- `ENTROPY_WEIGHT = 0.0` + 52-cand 복귀 + 2-stage family classifier 도입
+- 실제 결과: BCE loss 역효과 확인 → Phase 11 진입
+
+---
+
+### 2026-05-26
+
+**[Phase 10: 52-cand + Hit-aware BCE + Family Classifier — 실패]**
+
+**구현 내용**
+
+| 항목 | 변경 |
+|---|---|
+| candidates.py | 60-cand → 52-cand 복귀 (latency_s040/050, near_stop, reverse_mild, turn_p090/n090 제거) |
+| config.py | `FAMILY_WEIGHT=0.5`, `BCE_POS_WEIGHT=5.0` 추가 |
+| model.py | SA 제거 → 2-stage CandidateSelector (Stage1: CLS→family, Stage2: family-boosted logits) |
+| train.py | `hit_aware_bce_loss` (soft-CE 대체), `family_ce_loss` 추가 |
+
+**Loss 구성**: `BCE + 0.25×PW + 0.05×LML + 0.5×CE_family`
+
+- BCE: oracle(1cm 이내)=1, 나머지=0 이진 분류
+- Family CE: CLS → 6개 계열(base/acc/frenet/turn/jerk/latency) 분류 auxiliary loss
+- Family boost: 각 후보의 family log-prob을 logit에 더함
+
+**학습 결과 (seed 42)**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6530 |
+| 2 | 0.6429 |
+| 3 | 0.6387 |
+| 4 | 0.6475 |
+| 5 | 0.6365 |
+| **CV mean** | **0.6437 ± 0.0060** |
+| **OOF** | **0.6438** |
+
+**analyze.py 결과 (seed 42)**
+
+| 지표 | Phase 7 (52-cand, soft-CE) | Phase 10 (BCE+family) | 변화 |
+|---|---:|---:|---:|
+| OOF | **0.6510** | 0.6438 | **−0.72pp ❌** |
+| Oracle ceiling | 75.41% | 75.41% | = |
+| Selector efficiency | **86.3%** | 85.4% | −0.9pp |
+| Oracle rank mean | **13.3** | **21.1** | **+7.8 ❌** |
+| Oracle in Top-5 | 39.2% | **27.6%** | **−11.6pp ❌** |
+| A-group (oracle∩top-5) | 32.1% | **20.9%** | **−11.2pp ❌** |
+| B-group | **42.6%** | **54.5%** | **+11.9pp ❌** |
+| C-group | 22.6% | 24.6% | +2.0pp ❌ |
+
+**C-group 상세 분석 (analyze 4b)**
+
+```
+C-group: 2459개 (24.6%)
+nearest-cand dist: mean=2.65cm  p50=1.71  p75=3.22  p90=5.66
+
+True label Frenet 분포:
+  par : mean=0.77  std=0.67  p5=-0.36  p95=1.29
+  perp: mean=0.15  std=0.59  |p75|=0.45  |p95|=1.02
+  jerk: mean=0.48  p75=0.55  p95=1.70
+
+현재 커버리지: par=[0,1.20]  |perp|≤0.60  |jerk|≤0.50
+C-group 초과: |perp|>0.60 → 15.8%  /  par 범위 밖 → 20.9%
+
+C-group nearest 후보:
+  [21] latency_s075   620 (25.2%)  ← 극감속 클러스터
+  [45] jerk_xl_pos    353 (14.4%)  ─┐
+  [41] turn_p060      319 (13.0%)  ─┤ 합산 72.3% = 세 클러스터
+  [46] jerk_xl_neg    264 (10.7%)  ─┤
+  [42] turn_n060      221 ( 9.0%)  ─┘
+```
+
+**실패 원인 분석**
+
+| 의도 | 현실 |
+|---|---|
+| BCE(oracle=1/0) → 명확한 gradient → oracle rank 개선 | ranking 정보 손실 → oracle rank 13.3→21.1로 폭락 |
+| Family classifier → 계열 맞는 후보에 집중 | Family boost가 오히려 잘못된 계열로 logit 편향 |
+| soft-CE 대비 직접적인 R-Hit@1cm 최적화 | soft-CE가 더 풍부한 거리 기반 gradient 제공 |
+
+**결론**
+
+- ❌ BCE loss: soft-CE 대비 oracle rank 대폭 악화 (13.3→21.1)
+- ❌ Family classifier: 효과 없음 (Phase 8 SA+family feature와 OOF 동일 수준 0.6435≈0.6438)
+- **핵심 교훈**: C-group 개선을 위한 구조 변경보다 **B-group 개선(oracle ranking)** 이 우선
+- **근본 문제**: B-group 54.5% — oracle이 있는데 rank 21위에 묻혀 있음
+
+---
+
+---
+
+### 2026-05-26 (2)
+
+**[Phase 11: soft-CE 복귀 + Auxiliary Regression Head + 3-seed 앙상블 → LB 0.6692]**
+
+**핵심 발견: CAND_DIM=11 → 10 (family_id/5 제거)**
+
+Phase 10 soft-CE 복귀 후에도 OOF 0.6437 (Phase 7 0.6510 대비 −0.73pp)가 회복되지 않는 원인 분석:
+- Phase 8에서 `CAND_DIM=11` (family_id/5 추가) 후 Phase 10에서 SA만 제거, feature는 잔존
+- `make_cand_features_gpu`에서 family_id/5 제거 → `CAND_DIM=10` 복귀
+- **family_id 자체가 −0.73pp 원인이었음 확인**
+
+**Step 2 — Auxiliary Regression Head 구현**
+
+```python
+# model.py: CandidateSelector에 reg_head 추가
+self.reg_head = nn.Sequential(
+    nn.Linear(d_model, d_model // 2),
+    nn.GELU(),
+    nn.Dropout(dropout),
+    nn.Linear(d_model // 2, 3),  # CLS → rough Δ(x,y,z) from p0
+)
+
+# train.py: REG_WEIGHT=0.5 smooth_l1_loss 추가
+loss_reg = F.smooth_l1_loss(
+    (p0 + rough_delta) / R_HIT_THRESHOLD,
+    true / R_HIT_THRESHOLD,
+    beta=1.0,  # 1cm 단위 normalized space
+)
+loss = loss + REG_WEIGHT * loss_reg
+```
+
+목적: CLS가 "어디로 갈지" 인코딩 강제 → cross-attention이 올바른 방향 후보에 집중 (Faster R-CNN RPN 구조와 유사).
+
+**Step 2 단일 seed 결과 (seed 42)**
+
+| Fold | R-Hit |
+|---:|---:|
+| 1 | 0.6500 |
+| 2 | 0.6434 |
+| 3 | 0.6507 |
+| 4 | 0.6470 |
+| 5 | 0.6411 |
+| **CV mean** | **0.6464 ± 0.0037** |
+
+| 지표 | Phase 10 (BCE) | Phase 11 Step 2 | 변화 |
+|---|---:|---:|---:|
+| OOF | 0.6437 | **0.6464** | **+0.27pp ✅** |
+| Oracle rank mean | 21.1 | 15.8 | −5.3 ✅ |
+| Efficiency | 85.4% | **85.7%** | +0.3pp ✅ |
+| Oracle in Top-5 | 27.6% | 39.1% | +11.5pp ✅ |
+
+Phase 7 기준(oracle rank 13.3) 대비로는 15.8로 소폭 악화 — reg_head(REG_WEIGHT=0.5)가 cross-attention 학습과 경쟁하는 부작용.
+
+**Step 3 — latency_s060/s065 추가 (54-cand): 실패**
+
+Phase 8 OOF −0.75pp의 원인이 family_id(−0.73pp)라면 latency 후보 자체는 중립(−0.02pp) → 재시도.
+
+| 지표 | 52-cand (Step 2) | 54-cand (Step 3) | 변화 |
+|---|---:|---:|---:|
+| OOF | **0.6464** | 0.6443 | **−0.21pp ❌** |
+| Oracle | 75.41% | **75.78%** | +0.37pp ✅ |
+| Efficiency | **85.7%** | 85.0% | −0.7pp ❌ |
+| CV std | **0.0037** | 0.0076 | 분산 증가 ❌ (Fold 5 = 0.6305 붕괴) |
+
+결론: family_id 없이도 극단 감속 후보가 selector를 혼란시킴 → **latency_s060/s065 영구 제거 확정**.
+
+**3-seed 앙상블 제출 — LB 0.6692**
+
+Phase 11 Step 2(52-cand, reg_head) 기반 seeds 42+777+123 앙상블:
 
 ```bash
-# Phase 9 실행 순서
-python dev/experiments/train.py --seed 42   # 새 candidates + entropy penalty
-python dev/experiments/analyze.py --seed 42  # oracle ceiling + B/C group 확인
-# (통과 시) seed 777, 123 재훈련
-python dev/experiments/predict.py --seeds 42 777 123 --temp 2.0
+python dev/experiments/predict.py --seeds 42 777 123 --temp 1.0
 ```
+
+- **LB: 0.6692** — Phase 7 best **0.6716** 대비 **−0.24pp** ❌
+- reg_head가 OOF를 Phase 10 대비 개선했으나, Phase 7 single-seed LB조차 넘지 못함
+- Phase 7에서는 single-seed 제출(seed42, temp=2.0) LB=0.6712 달성 → 3-seed가 항상 유리하지는 않음
+
+**Phase 11 종합 평가**
+
+| 실험 | OOF | LB | 결론 |
+|---|---:|---:|---|
+| Phase 7 best (52-cand, soft-CE+PW+LML, 2-seed 42+777) | 0.6484 | **0.6716** | 현재 LB 최고 |
+| Phase 11 Step 2 (52-cand, reg_head, seed42) | **0.6464** | — | single-seed OOF Phase 7 미달 |
+| Phase 11 3-seed (42+777+123) | — | 0.6692 | ❌ Phase 7 하회 |
+
+**현재 bottleneck 재정의**
+
+| 항목 | 값 | 한계 |
+|---|---|---|
+| Oracle ceiling | 75.41% | C-group 24.6% 고착 (극단 후보 추가 시 efficiency 하락) |
+| Best LB | **0.6716** | Phase 5/7 (52-cand, soft-CE+PW+LML, 2-seed 42+777) |
+| Selector efficiency | 85.7% | B-group 48.0% 병목 |
+| C-group 후보 확장 | 불가 | latency_s060/jerk_xxl/turn_p075 모두 efficiency 저하 확인 |
+
+---
+
+### 다음 실험 계획 (Phase 12)
+
+**목표: LB 0.71**
+
+**현황 (Phase 11 이후)**
+
+| 항목 | 값 |
+|---|---|
+| Oracle ceiling | 75.41% (52-cand) |
+| Best OOF | 0.6510 (Phase 7, soft-CE, single-seed 42) |
+| Best LB | **0.6716** (Phase 5/7, 2-seed 42+777) |
+| Phase 11 OOF | 0.6464 (single-seed 42, reg_head 포함) |
+| Phase 11 LB | 0.6692 (3-seed 42+777+123) — Phase 7 하회 |
+| Oracle rank mean | 15.8 (Phase 11) / 13.3 (Phase 7) → 목표 < 10 |
+| B-group 비율 | 48.0% → 목표 < 35% |
+| 0.71 달성 조건 | Oracle×Efficiency ≥ 0.71 (예: 0.76×0.934 또는 0.80×0.888) |
+
+**C-group 클러스터 구조 (Phase 11 재확인)**
+
+```
+극감속 (25.2%): latency_s075 nearest → time_scale < 0.75 필요
+                 BUT latency_s060/065 추가 시 OOF −0.21pp → 후보 추가 불가
+극jerk  (25.1%): jerk_xl nearest     → |jerk| > 0.50 필요
+                 BUT Phase 9 jerk_xxl 실험 efficiency −4.9pp → 후보 추가 불가
+극회전  (22.0%): turn_p/n060 nearest → |perp| > 0.60 필요
+                 BUT turn_p/n075 제거 이력 (B-group 증가) → 후보 추가 불가
+```
+
+**Phase 12 방향 (탐색 예정)**
+
+| 방향 | 내용 | 기대 효과 |
+|---|---|---|
+| REG_WEIGHT 튜닝 | 0.5 → 0.1~0.2 (oracle rank 15.8 → 13 목표) | B-group 개선 |
+| Single-seed 제출 재탐색 | Phase 7처럼 seed42 단독, temp=2.0 | Phase 7 LB 0.6712 재현 가능성 |
+| 아키텍처 개선 | Gated Cross-Attention, deeper head | efficiency ↑ |
+| 손실 함수 | Focal ListMLE (hard negative 집중) | oracle rank ↓ |
