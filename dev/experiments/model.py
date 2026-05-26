@@ -14,7 +14,7 @@ Phase 11 Step 2 구조:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP
+from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP, EPS
 
 SEQ_DIM  = 11
 CAND_DIM = 10  # family_id/5 제거 (Phase 8 추가됐으나 −0.73pp → 제거)
@@ -145,6 +145,62 @@ class TransformerRegressor(nn.Module):
         seq_h = self.seq_encoder(seq_h)
         cls   = seq_h[:, -1, :]
         return p0 + self.head(cls)
+
+
+class MosquitoLSTM(nn.Module):
+    """
+    BiLSTM direct regression for mosquito position.
+    Frenet-parametric output: pred = p0 + d1_s·d1 + par·acc_par + perp·acc_perp + jerk_s·jerk
+    This output is yaw-invariant because seq_features are rotation-invariant and the
+    Frenet coefficients map to XYZ via the actual trajectory's tangent/normal frame.
+
+    Trained with C-group 10× weighted smooth_l1 loss to focus on borderline cases
+    where the selector's 52 physical candidates all miss (nearest candidate > 1cm).
+    """
+    def __init__(self, hidden: int = 64, num_layers: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=SEQ_DIM,
+            hidden_size=hidden,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+        self.head = nn.Linear(hidden * 2, 4)   # (d1_scale, par, perp, jerk_scale)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
+        self.head.bias.data[0] = 2.0           # init: pure linear extrapolation
+
+    def forward(self, seq_feat: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """
+        seq_feat : (B, 11, SEQ_DIM) — rotation-invariant sequence features
+        coords   : (B, 11, 3)       — raw 3D trajectory
+        Returns  : (B, 3)           — predicted next position
+        """
+        _, (h_n, _) = self.lstm(seq_feat)
+        h      = torch.cat([h_n[-2], h_n[-1]], dim=-1)  # (B, hidden*2) last-layer fwd+bwd
+        params = self.head(h)                             # (B, 4)
+
+        p0       = coords[:, 10]
+        d1       = coords[:, 10] - coords[:, 9]
+        d2       = coords[:, 9]  - coords[:, 8]
+        acc      = d1 - d2
+        prev_acc = d2 - (coords[:, 8] - coords[:, 7])
+        jerk     = acc - prev_acc
+
+        speed    = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
+        tangent  = d1 / speed
+        acc_par  = (acc * tangent).sum(-1, keepdim=True) * tangent  # (B, 3) tangential
+        acc_perp = acc - acc_par                                      # (B, 3) normal
+
+        return (
+            p0
+            + params[:, 0:1] * d1        # velocity term
+            + params[:, 1:2] * acc_par   # parallel acceleration
+            + params[:, 2:3] * acc_perp  # perpendicular acceleration
+            + params[:, 3:4] * jerk      # jerk correction
+        )
 
 
 def soft_labels(cands: torch.Tensor, true: torch.Tensor, temp: float = SOFT_TEMP) -> torch.Tensor:

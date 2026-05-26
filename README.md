@@ -361,6 +361,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | **Phase 11 Step 2: soft-CE + reg_head, CAND_DIM=10 (seed42)** | **52** | 0.6464 ± 0.0037 | 75.41% | 85.7% | **0.6464** | family_id 제거 회복 + Auxiliary Reg Head (REG_WEIGHT=0.5) |
 | Phase 11 Step 3: 54-cand + latency_s060/065 (seed42) | 54 | 0.6442 ± 0.0076 | 75.78% | 85.0% | 0.6443 | ❌ OOF −0.21pp — family_id 없어도 극단 감속 후보가 efficiency 저하 → 영구 제거 |
 | **Phase 11: 3-seed 앙상블 (42+777+123), temp=1.0** | **52** | — | 75.41% | — | — | **LB 0.6692** ❌ Phase 7 best(0.6716) 하회 −0.24pp |
+| **Phase 12: BiLSTM C-group + routing 13.4% (seeds 42+777+123)** | 52 | — | 75.41% | — | ~0.625 | **LB 0.6588** ❌ routing 오발동 → A+B 오염. C-group OOF 0.62%→3.54% 개선 확인 |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -1994,39 +1995,112 @@ python dev/experiments/predict.py --seeds 42 777 123 --temp 1.0
 
 ---
 
-### 다음 실험 계획 (Phase 12)
+### 2026-05-26 (3)
 
-**목표: LB 0.71**
+**[Phase 12: BiLSTM C-group 직접 회귀 + Physics-based Routing — LB 0.6588]**
 
-**현황 (Phase 11 이후)**
+**배경 및 동기**
+
+| 접근 | 실패 원인 |
+|---|---|
+| TransformerRegressor (reg2) | 균일 학습 → 쉬운 샘플에 수렴, C-group 무시. OOF C-group 0.62% |
+| Entropy routing | H≈0.986 (52-cand 구조적 최대) → 그룹 구분 불가 |
+
+**아키텍처: MosquitoLSTM (model.py)**
+
+- BiLSTM (hidden=64, 2 layers, bidirectional) — 139K params (vs selector ~0.8M)
+- **Frenet-parametric 출력**: `pred = p0 + d1_s·d1 + par·acc_par + perp·acc_perp + jerk_s·jerk`
+  - yaw-invariant: seq_features 회전 불변 + Frenet 계수가 실제 궤적 tangent/normal frame으로 매핑
+  - TransformerRegressor 실패 원인(raw Δx,Δy,Δz가 yaw 증강과 비호환) 해결
+- d1_scale bias 초기값 2.0 (선형 외삽 초기화)
+
+**학습 전략 (train_lstm.py)**
+
+- **C-group 10× 가중 손실**: 배치마다 `make_candidates_gpu` → `min_dist > 1cm` 샘플에 weight=10
+- Loss: smooth_l1 (beta=R_HIT_THRESHOLD) — 1cm 미만 L2, 이상 L1
+- yaw 증강, early stopping patience=30, lr=1e-3
+
+**훈련 결과 (seeds 42/777/123)**
+
+| Seed | CV mean | OOF 전체 | OOF C-group | OOF A+B |
+|---:|---:|---:|---:|---:|
+| 42 | 0.6283 ± 0.0040 | 0.6283 | **3.54%** | 82.16% |
+| 777 | 0.6195 ± 0.0083 | 0.6195 | 2.48% | 81.34% |
+| 123 | 0.6252 ± 0.0054 | 0.6252 | 3.21% | 81.86% |
+| **3-seed 평균** | — | ~0.625 | **~3.1%** | ~82% |
+
+C-group R-Hit: **0.62% → ~3.1%** (5× 향상) — 5% 목표 미달이나 유의미한 개선
+
+**Physics-based Routing (regression.py)**
+
+```python
+# 초기 설정 (routing 13.4% → LB 하락)
+decel_thresh=1.4, jerk_thresh=0.25, max_alpha=0.45
+
+# 수정 후 (routing 4.5%)
+decel_thresh=2.5, jerk_thresh=0.55, max_alpha=0.30
+```
+
+신호:
+- `speed_ratio > 2.5`: 극감속 (현재 speed < 이전 speed × 40%)
+- `jerk_abs > 0.55`: 극jerk (일반 0.04, C-group jerk 0.1~0.3 상단 초과)
+
+**LB 결과 및 분석**
+
+| 제출 | routing | LB |
+|---|---:|---:|
+| 3-seed LSTM blend (초기, 13.4%) | 13.4% | **0.6588** ❌ |
+| selector-only (Phase 11 best) | 0% | 0.6692 |
+| **Best LB** | — | **0.6716** |
+
+초기 routing(13.4%)이 A+B group 오염으로 **−0.013 손실**. 임계값 상향 후 OOF 기준 +0.0011 개선 확인 (미제출).
+
+**OOF 로컬 평가 (eval_lstm_blend.py)**
+
+```
+routing 4.5% 기준:
+  Selector OOF:  0.6371  (C-group 0.00%)
+  LSTM OOF:      0.6296  (C-group 3.09%)
+  Blend OOF:     0.6382  (+0.0011 개선)
+```
+
+**결론**
+
+- C-group 개선(0.62% → 3.54%)은 성공했으나 test set에서 net gain이 너무 작음
+- LSTM 단독 전체 OOF(0.625) < selector(0.647) → routing 오발동 시 손실이 이득을 초과
+- **LSTM 접근 자체는 유효**하나 C-group R-Hit을 10%+ 수준으로 올려야 LB 유의미한 개선 가능
+
+**신규 파일**
+
+| 파일 | 내용 |
+|---|---|
+| `train_lstm.py` | BiLSTM C-group 학습 스크립트 |
+| `eval_lstm_blend.py` | selector OOF + LSTM OOF blend 로컬 평가 |
+| `model.py` | `MosquitoLSTM` 클래스 추가 |
+| `regression.py` | `physics_routing_alpha`, `load_lstm_models`, `predict_lstm_batch` 추가 |
+| `predict.py` | `--lstm` 플래그 추가 |
+
+---
+
+### 다음 실험 계획 (Phase 13)
+
+**목표: LB 0.68+**
+
+**현황**
 
 | 항목 | 값 |
 |---|---|
-| Oracle ceiling | 75.41% (52-cand) |
-| Best OOF | 0.6510 (Phase 7, soft-CE, single-seed 42) |
 | Best LB | **0.6716** (Phase 5/7, 2-seed 42+777) |
-| Phase 11 OOF | 0.6464 (single-seed 42, reg_head 포함) |
-| Phase 11 LB | 0.6692 (3-seed 42+777+123) — Phase 7 하회 |
-| Oracle rank mean | 15.8 (Phase 11) / 13.3 (Phase 7) → 목표 < 10 |
-| B-group 비율 | 48.0% → 목표 < 35% |
-| 0.71 달성 조건 | Oracle×Efficiency ≥ 0.71 (예: 0.76×0.934 또는 0.80×0.888) |
+| B-group 비율 | 48.0% → **핵심 병목** |
+| C-group 비율 | 24.6% → LSTM으로 부분 커버 (3.54%, 추가 개선 필요) |
+| Oracle ceiling | 75.41% (52-cand) |
 
-**C-group 클러스터 구조 (Phase 11 재확인)**
+**Phase 13 방향: GCN Candidate Re-ranker (B-group 개선)**
 
-```
-극감속 (25.2%): latency_s075 nearest → time_scale < 0.75 필요
-                 BUT latency_s060/065 추가 시 OOF −0.21pp → 후보 추가 불가
-극jerk  (25.1%): jerk_xl nearest     → |jerk| > 0.50 필요
-                 BUT Phase 9 jerk_xxl 실험 efficiency −4.9pp → 후보 추가 불가
-극회전  (22.0%): turn_p/n060 nearest → |perp| > 0.60 필요
-                 BUT turn_p/n075 제거 이력 (B-group 증가) → 후보 추가 불가
-```
-
-**Phase 12 방향 (탐색 예정)**
+B-group 병목 원인: 52개 후보가 독립 채점 → oracle 후보와 인접한 "유사 decoy"를 구분 못함
 
 | 방향 | 내용 | 기대 효과 |
 |---|---|---|
-| REG_WEIGHT 튜닝 | 0.5 → 0.1~0.2 (oracle rank 15.8 → 13 목표) | B-group 개선 |
-| Single-seed 제출 재탐색 | Phase 7처럼 seed42 단독, temp=2.0 | Phase 7 LB 0.6712 재현 가능성 |
-| 아키텍처 개선 | Gated Cross-Attention, deeper head | efficiency ↑ |
-| 손실 함수 | Focal ListMLE (hard negative 집중) | oracle rank ↓ |
+| **GCN candidate graph** | 후보 간 KNN 그래프 + GCN message passing → oracle 후보의 공간적 고유성 강화 | B-group 개선 → efficiency ↑ |
+| 구조 | cross-attn 이후 GCN 1~2 layer 추가 (end-to-end) | 파라미터 최소 증가 |
+| 그래프 | 후보 간 거리 기반 KNN (k=5~8) | 물리적 유사 후보 클러스터 구분 |

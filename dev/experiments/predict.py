@@ -1,16 +1,22 @@
 """
 Inference: K-Fold selector ensemble + optional multi-seed ensemble -> submission CSV.
-Optional entropy-based regression blend.
+Optional entropy-based regression blend or physics-routed LSTM blend.
 
 Single seed:      python predict.py --seed 42
 Multi-seed:       python predict.py --seeds 42 777
+LSTM blend:       python predict.py --seed 42 --lstm
 Reg2 blend:       python predict.py --seeds 42 777 --reg2 --beta 1.0
 RegMLP blend:     python predict.py --seeds 42 777 --beta 1.0   (legacy)
 
-Blend logic (--reg2 preferred):
-  α = clip(1 - beta × H_norm, 0, 1)   H_norm = normalised entropy ∈ [0,1]
+LSTM blend (--lstm):
+  alpha = physics_routing_alpha(seq_feat)  ∈ [0, 0.5]  per-sample
+  pred  = (1 - alpha) × selector + alpha × lstm
+  Routing fires on: decel (speed_ratio > 1.8) or jerk (jerk_abs > 0.8)
+  → C-group 극감속/jerk 클러스터 타겟 (~50% of C-group = ~12.5% of total)
+
+Entropy blend (--reg2):
+  α = clip(1 - beta × H_norm, 0, 1)
   pred = α × selector + (1-α) × regressor
-  H≈0 (confident) → trust selector;  H≈1 (uncertain) → lean on regressor
 """
 import argparse
 import numpy as np
@@ -30,6 +36,7 @@ from regression import (
     load_reg_models, predict_reg_batch,
     load_reg2_models, predict_reg2_batch,
     entropy_blend,
+    load_lstm_models, predict_lstm_batch, physics_routing_alpha,
 )
 
 
@@ -43,7 +50,7 @@ def load_selectors(seeds: list, device: torch.device) -> list:
             if not path.exists():
                 raise FileNotFoundError(f"Missing: {path}  (run: python train.py --seed {seed})")
             m = CandidateSelector().to(device)
-            m.load_state_dict(torch.load(path, map_location=device))
+            m.load_state_dict(torch.load(path, map_location=device), strict=False)
             m.eval()
             models.append(m)
     print(f"  {len(models)} selector models loaded ({len(seeds)} seeds × {N_FOLDS} folds)")
@@ -60,7 +67,13 @@ def load_boundary(device: torch.device):
     return m
 
 
-def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: bool = False):
+def predict(
+    seeds: list = None,
+    beta: float = 1.0,
+    temp: float = 2.0,
+    use_reg2: bool = False,
+    use_lstm: bool = False,
+):
     if seeds is None:
         seeds = [SEED]
     torch.manual_seed(seeds[0])
@@ -69,6 +82,14 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: 
 
     selectors = load_selectors(seeds, device)
     boundary  = load_boundary(device)
+
+    # LSTM 모델 로드 (--lstm 플래그)
+    lstm_models = []
+    if use_lstm:
+        print("  LSTM 모델 확인...")
+        lstm_models = load_lstm_models(seeds, device)
+        if not lstm_models:
+            print("  ※ LSTM 없음 — selector-only로 진행 (--lstm 무시)")
 
     # Regressor loading: prefer reg2 (TransformerRegressor), fallback to RegMLP
     reg_models_flat = []
@@ -94,6 +115,8 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: 
     all_preds   = []
     all_logits  = []
     all_reg     = [] if use_blend else None
+    all_lstm    = [] if lstm_models else None
+    all_alpha   = [] if lstm_models else None
 
     for start in tqdm(range(0, N, BATCH_SIZE), desc="Inference"):
         end  = min(start + BATCH_SIZE, N)
@@ -117,10 +140,20 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: 
                 reg_pred = predict_reg_batch(reg_models_flat, c)
             all_reg.append(reg_pred.cpu().numpy())
 
+        if lstm_models:
+            with torch.no_grad():
+                lstm_pred = predict_lstm_batch(lstm_models, c, seq_t)
+                alpha_t   = physics_routing_alpha(seq_t)    # seq_t 재사용
+            all_lstm.append(lstm_pred.cpu().numpy())
+            all_alpha.append(alpha_t.cpu().numpy())
+
     all_preds  = np.concatenate(all_preds,  axis=0)   # (N, 3)
     all_logits = np.concatenate(all_logits, axis=0)   # (N, C)
     if use_blend:
         all_reg = np.concatenate(all_reg, axis=0)      # (N, 3)
+    if lstm_models:
+        all_lstm  = np.concatenate(all_lstm,  axis=0)  # (N, 3)
+        all_alpha = np.concatenate(all_alpha, axis=0)  # (N,)
 
     sub = pd.read_csv(SUBMISSION_PATH, index_col="id")
 
@@ -136,14 +169,25 @@ def predict(seeds: list = None, beta: float = 1.0, temp: float = 2.0, use_reg2: 
     # 1. Selector-only
     save_csv(all_preds, "submission.csv")
 
-    # 2. Entropy-blend (regressor 있을 때)
+    # 2. Physics-routed LSTM blend
+    if lstm_models:
+        alpha    = all_alpha[:, np.newaxis]                            # (N, 1)
+        n_routed = int((alpha > 0).sum())
+        print(f"  Routing 발동: {n_routed} / {N} 샘플 ({n_routed/N*100:.1f}%)")
+        print(f"  alpha 분포: mean={alpha.mean():.3f}  max={alpha.max():.3f}")
+
+        lstm_blended = (1 - alpha) * all_preds + alpha * all_lstm
+        save_csv(lstm_blended, "submission_lstm.csv")
+        print(f"  ※ physics routing LSTM blend (decel/jerk → max α=0.5)")
+
+    # 3. Entropy-blend (regressor 있을 때)
     if use_blend:
         blended = entropy_blend(all_preds, all_reg, all_logits, beta=beta)
         blend_name = f"submission_blend_{reg2_label}.csv"
         save_csv(blended, blend_name)
         print(f"  ※ entropy blend [{reg2_label}] β={beta}  (β 조정: --beta 값)")
 
-    # 3. Boundary (이전 실험 잔재, 피처 불일치 시 skip)
+    # 5. Boundary (이전 실험 잔재, 피처 불일치 시 skip)
     if boundary is not None:
         try:
             all_coords = np.concatenate([
@@ -169,6 +213,8 @@ if __name__ == "__main__":
                         help="Softmax temperature for Top-k weighted avg (default: 2.0)")
     parser.add_argument("--reg2", action="store_true",
                         help="Use TransformerRegressor (reg2) for entropy-blend instead of RegMLP")
+    parser.add_argument("--lstm", action="store_true",
+                        help="Physics-routed LSTM blend (train_lstm.py 학습 후 사용)")
     args = parser.parse_args()
 
     if args.seeds:
@@ -178,4 +224,4 @@ if __name__ == "__main__":
     else:
         seeds = [SEED]
 
-    predict(seeds=seeds, beta=args.beta, temp=args.temp, use_reg2=args.reg2)
+    predict(seeds=seeds, beta=args.beta, temp=args.temp, use_reg2=args.reg2, use_lstm=args.lstm)

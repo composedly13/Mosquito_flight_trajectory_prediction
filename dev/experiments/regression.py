@@ -265,3 +265,88 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=SEED)
     args = parser.parse_args()
     train_regression(seed=args.seed)
+
+
+# ── Physics-based routing (LSTM ensemble) ─────────────────────────────────────
+
+def physics_routing_alpha(
+    seq_feat: torch.Tensor,
+    decel_thresh: float = 2.5,
+    jerk_thresh:  float = 0.55,
+    alpha_decel:  float = 0.30,
+    alpha_jerk:   float = 0.30,
+    max_alpha:    float = 0.30,
+) -> torch.Tensor:
+    """
+    seq_feat의 last-timestep 신호로 C-group 가능성을 감지, per-sample LSTM 비중 결정.
+
+    반환: (B,) alpha 값 — 0.0(selector-only) ~ max_alpha(강한 LSTM 비중)
+
+    신호:
+      speed_ratio (feat idx 1): prev_speed / current_speed
+        > decel_thresh → 급감속 → C-group 극감속 클러스터 (latency_s075 nearest 25%)
+        실측값: 일반 ~1.0, 극감속 2.0+
+      jerk_abs (feat idx 9): ||acc-prev_acc|| / 0.05m
+        > jerk_thresh → 강한 jerk → C-group jerk 클러스터 (jerk_xl nearest 25%)
+        실측값: 일반 ~0.04, C-group jerk ~0.1-0.3
+
+    임계값 캘리브레이션:
+      decel_thresh=1.4: 현재 speed가 이전 step의 70% 이하 (40% 감속)
+      jerk_thresh=0.25: jerk_vec = 12.5mm/step (전형 5mm 대비 2.5×)
+      max_alpha=0.45: 완전 LSTM 신뢰 금지 (selector가 더 강한 영역 보호)
+
+    C-group 분포 (Phase 11):
+      극감속  25.2%: latency_s075 nearest → decel_thresh 커버
+      극jerk  25.1%: jerk_xl nearest      → jerk_thresh 커버
+      극회전  22.0%: turn_p/n060 nearest  → 별도 신호 없음 (미커버)
+
+    조정: 학습 후 predict.py 출력 'Routing 발동' 비율로 임계값 튜닝 가능.
+    목표 발동률: 10-15% (C-group 극감속/jerk ≈ 12.5%)
+    """
+    # Last timestep features (t=10 기준)
+    speed_ratio = seq_feat[:, -1, 1]   # prev_speed / current_speed
+    jerk_abs    = seq_feat[:, -1, 9]   # ||jerk|| / 0.05
+
+    decel_signal = (speed_ratio > decel_thresh).float() * alpha_decel
+    jerk_signal  = (jerk_abs    > jerk_thresh).float()  * alpha_jerk
+
+    return (decel_signal + jerk_signal).clamp(0.0, max_alpha)
+
+
+# ── MosquitoLSTM inference helpers ────────────────────────────────────────────
+
+def load_lstm_models(seeds: list, device: torch.device) -> list:
+    """
+    lstm_fold{i}.pt 파일을 로드해 flat list로 반환.
+    train_lstm.py --seed {seed} 로 학습 후 사용.
+    """
+    from model import MosquitoLSTM
+    models = []
+    for seed in seeds:
+        seed_dir = OUTPUT_DIR / f"seed{seed}"
+        for fold in range(N_FOLDS):
+            path = seed_dir / f"lstm_fold{fold}.pt"
+            if path.exists():
+                m = MosquitoLSTM().to(device)
+                m.load_state_dict(
+                    torch.load(path, map_location=device, weights_only=True)
+                )
+                m.eval()
+                models.append(m)
+    if models:
+        print(f"  LSTM: {len(models)} models 로드 ({len(seeds)} seeds)")
+    else:
+        print("  LSTM: 없음 — python dev/experiments/train_lstm.py --seed 42 먼저 실행")
+    return models
+
+
+def predict_lstm_batch(
+    lstm_models: list,
+    coords:      torch.Tensor,   # (B, 11, 3)
+    seq_feat:    torch.Tensor,   # (B, 11, 11) — 이미 계산된 seq_features 재사용
+) -> torch.Tensor:               # (B, 3)
+    """
+    모든 LSTM 모델의 예측을 평균. seq_feat는 predict 루프에서 이미 계산된 것을 전달.
+    """
+    with torch.no_grad():
+        return sum(m(seq_feat, coords) for m in lstm_models) / len(lstm_models)
