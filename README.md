@@ -2187,16 +2187,46 @@ base_delta = base_pred − p0 추가로 per-sample 방향 보정 가능.
 | 항목 | 값 |
 |---|---|
 | Best LB | **0.6716** (Phase 5/7, 2-seed 42+777, GCN 없음) |
-| Phase 13 GCN LB | 0.6688 (−0.0028 vs best) |
+| Phase 13 GCN base LB | 0.6688 (−0.0028 vs best) |
 | Phase 13 blend LB | 0.6674 |
 | OOF/LB 역전 원인 | GCN + C-gate 오버피팅 (10K 샘플 부족) |
 
-**Phase 14 방향: GCN 오버피팅 원인 분석 + 데이터 증강**
+**Phase 14 방향: 데이터 증강으로 GCN 오버피팅 억제**
 
-| 방향 | 내용 | 기대 효과 |
-|---|---|---|
-| GCN 없이 3-seed 재확인 | Phase 11 원래 아키텍처 + 3-seed 앙상블 | GCN 제거만으로 LB 0.6716+ 가능한지 확인 |
-| **데이터 증강 강화** | 현재 yaw-only → 추가 증강 탐색 (noise 주입, jitter, mirror) | 10K 샘플 다양성 증가 → 오버피팅 완화 |
-| GCN 정규화 | dropout ↑, weight decay ↑, 레이어 수 감소 | GCN 복잡도 낮춰 오버피팅 억제 |
-| test set 분포 분석 | train OOF vs LB 갭 패턴 — 어떤 샘플 유형이 LB에서 다른지 | 증강 방향 결정 |
-| 그래프 | 후보 간 거리 기반 KNN (k=5~8) | 물리적 유사 후보 클러스터 구분 |
+GCN/LSTM 등 추가 파라미터를 유지하되, 학습 데이터 다양성을 높여 오버피팅을 완화한다.
+
+**구현 완료: 추가 증강 2종**
+
+| 증강 | 구현 위치 | 설정값 | 설명 |
+|---|---|---|---|
+| **x/y mirror flip** | `dataset.py` `augment_mirror_gpu()` | `AUG_FLIP=True`, prob=0.5 독립 | x(forward)/y(left) 각 축 독립 반전 → 4가지 조합, 실질 4× 다양성. z(up)는 중력 방향이므로 미적용 |
+| **Coordinate noise** | `dataset.py` `augment_noise_gpu()` | `AUG_NOISE=True`, `NOISE_STD=0.001` | 입력 좌표에 1mm Gaussian jitter, 라벨은 clean 유지. LiDAR 측정 노이즈 시뮬레이션 |
+
+적용 순서: `yaw → flip → noise` (train 배치마다 on-the-fly)
+
+**다음 실행 명령 (RTX 5080 데스크탑)**
+
+```bash
+python dev/experiments/train.py --seed 42
+python dev/experiments/train.py --seed 777
+python dev/experiments/train.py --seed 123
+python dev/experiments/predict.py --seeds 42 777 123 --temp 2.0
+```
+
+**성공 기준**
+
+| 지표 | 목표 |
+|---|---|
+| OOF (seed42) | ≥ 0.6506 (Phase 13 GCN 동등 이상) |
+| LB (3-seed) | **> 0.6716** (Phase 5/7 best 돌파) |
+
+OOF가 Phase 13과 비슷하면서 LB가 오르면 → 증강이 오버피팅을 실제로 줄인 것.  
+OOF도 같이 오르면 → 증강이 일반화 + 학습 둘 다 개선.
+
+**이후 탐색 후보 (결과에 따라)**
+
+| 방향 | 조건 |
+|---|---|
+| C-gate / GRUResidual 재학습 | Phase 14 base LB > 0.6716 확인 후 |
+| NOISE_STD 튜닝 (0.5mm / 2mm) | OOF 변화 없을 시 |
+| GCN dropout 강화 | LB 여전히 역전 시 |

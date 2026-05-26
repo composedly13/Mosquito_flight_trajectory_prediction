@@ -28,6 +28,16 @@ AUG_MODE          = 'yaw'
 SPEED_SCALE_RANGE = (0.85, 1.15)   # Uniform scale range (실험 보존용)
 SPEED_SCALE_PROB  = 0.5            # fraction of samples that get scaled (실험 보존용)
 
+# 추가 증강 (yaw 이후 독립적으로 적용)
+# AUG_FLIP  : y축(left) 반전, prob=0.5 — 좌/우 비행 대칭 (물리적으로 타당)
+#             x축(forward) 반전도 가능하나 센서 시야 방향성 불확실 → y만 적용
+#             z축(up) 반전은 중력 방향 파괴 → 절대 적용 금지
+# AUG_NOISE : 입력 좌표 Gaussian jitter, 라벨은 clean 유지
+#             LiDAR 센서 측정 노이즈(~1mm) 시뮬레이션 → 소폭 perturbation에 강건성
+AUG_FLIP   = True
+AUG_NOISE  = True
+NOISE_STD  = 0.001  # 1mm
+
 # Selector Model (Transformer)
 # d256 run result: CV 0.6365 (worse than d128 0.6410) — likely overfitting on 8k samples
 # reverting to d128 with yaw to isolate augmentation effect

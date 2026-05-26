@@ -81,6 +81,34 @@ def augment_batch_gpu_yaw_with_R(coords: torch.Tensor):
     return torch.bmm(coords, R.mT), R
 
 
+def augment_mirror_gpu(coords: torch.Tensor, labels: torch.Tensor) -> tuple:
+    """Independent x/y axis mirror flip (each prob=0.5). Preserves z=UP.
+    - y(left) flip: left/right symmetry — always physically valid
+    - x(forward) flip: forward/backward — valid assuming no sensor directional bias
+    - z(up) flip: gravity axis — NEVER applied (would create upside-down trajectories)
+    4 combinations: no flip / x only / y only / x+y  (each 25%)
+    """
+    B, dev, dt = coords.shape[0], coords.device, coords.dtype
+    sign_x = (torch.rand(B, device=dev, dtype=dt) < 0.5).to(dt) * 2 - 1  # (B,) ∈ {-1,+1}
+    sign_y = (torch.rand(B, device=dev, dtype=dt) < 0.5).to(dt) * 2 - 1
+
+    coords_aug = coords.clone()
+    coords_aug[:, :, 0] = coords[:, :, 0] * sign_x[:, None]
+    coords_aug[:, :, 1] = coords[:, :, 1] * sign_y[:, None]
+
+    labels_aug = labels.clone()
+    labels_aug[:, 0] = labels[:, 0] * sign_x
+    labels_aug[:, 1] = labels[:, 1] * sign_y
+    return coords_aug, labels_aug
+
+
+def augment_noise_gpu(coords: torch.Tensor, std: float = 0.001) -> torch.Tensor:
+    """Gaussian coordinate noise on input trajectory only (label stays clean).
+    Simulates LiDAR sensor measurement noise (~1mm).
+    Encourages the model to be robust to small positional perturbations."""
+    return coords + torch.randn_like(coords) * std
+
+
 def augment_speed_scale_gpu(
     coords: torch.Tensor,
     labels: torch.Tensor,

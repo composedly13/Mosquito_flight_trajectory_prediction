@@ -12,6 +12,7 @@ from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEM
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
+    augment_mirror_gpu, augment_noise_gpu,
 )
 from model import CandidateSelector, soft_labels, selector_predict
 from candidates import N_CANDIDATES, make_candidates, make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
@@ -114,6 +115,11 @@ def train_fold(
                     scale_range=SPEED_SCALE_RANGE,
                     prob=SPEED_SCALE_PROB,
                 )
+
+            if AUG_FLIP:
+                coords_b, true = augment_mirror_gpu(coords_b, true)
+            if AUG_NOISE:
+                coords_b = augment_noise_gpu(coords_b, std=NOISE_STD)
 
             cands  = make_candidates_gpu(coords_b)
             seq_f  = make_seq_features_gpu(coords_b)
