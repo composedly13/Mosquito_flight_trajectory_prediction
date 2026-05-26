@@ -83,10 +83,10 @@ def augment_batch_gpu_yaw_with_R(coords: torch.Tensor):
 
 def augment_mirror_gpu(coords: torch.Tensor, labels: torch.Tensor) -> tuple:
     """Independent x/y axis mirror flip (each prob=0.5). Preserves z=UP.
-    - y(left) flip: left/right symmetry — always physically valid
-    - x(forward) flip: forward/backward — valid assuming no sensor directional bias
-    - z(up) flip: gravity axis — NEVER applied (would create upside-down trajectories)
-    4 combinations: no flip / x only / y only / x+y  (each 25%)
+    - x(forward) flip: 상대 좌표 기반이므로 물리적으로 유효
+    - y(left) flip: 좌우 대칭, 물리적으로 유효
+    - z(up) flip: 중력 방향 — 절대 적용 금지
+    4가지 조합: no flip / x only / y only / x+y (각 25%)
     """
     B, dev, dt = coords.shape[0], coords.device, coords.dtype
     sign_x = (torch.rand(B, device=dev, dtype=dt) < 0.5).to(dt) * 2 - 1  # (B,) ∈ {-1,+1}

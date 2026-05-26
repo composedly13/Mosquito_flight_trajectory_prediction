@@ -15,10 +15,10 @@ OUTPUT_DIR      = _EXP_DIR / "outputs"
 SEED        = 42
 N_FOLDS     = 5
 BATCH_SIZE  = 256
-EPOCHS      = 200
+EPOCHS      = 1000
 LR          = 3e-4
 WEIGHT_DECAY = 1e-4
-PATIENCE    = 40        # early stopping
+PATIENCE    = 300       # 증강 환경에서 분산 큼 → 충분한 patience
 
 # Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
 # 'yaw'       : z-axis rotation only (safe for LiDAR z=UP frame)
