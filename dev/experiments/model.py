@@ -20,6 +20,50 @@ SEQ_DIM  = 11
 CAND_DIM = 10  # family_id/5 제거 (Phase 8 추가됐으나 −0.73pp → 제거)
 
 
+class CandidateGCN(nn.Module):
+    """
+    EdgeConv-style GCN over candidate spatial graph.
+    Each candidate aggregates info from k nearest spatial neighbors,
+    helping distinguish the oracle candidate from nearby decoys (B-group).
+    """
+    def __init__(self, d_model: int, k: int = 6, num_layers: int = 1, dropout: float = 0.1):
+        super().__init__()
+        self.k = k
+        self.convs = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model * 2, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, d_model),
+            )
+            for _ in range(num_layers)
+        ])
+        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_layers)])
+
+    def _knn_idx(self, pos: torch.Tensor) -> torch.Tensor:
+        """pos: (B, C, 3) → (B, C, k) nearest neighbor indices"""
+        sq  = pos.square().sum(-1)                              # (B, C)
+        dot = torch.bmm(pos, pos.transpose(1, 2))              # (B, C, C)
+        d2  = sq.unsqueeze(2) + sq.unsqueeze(1) - 2.0 * dot   # (B, C, C)
+        d2.diagonal(dim1=-2, dim2=-1).fill_(float('inf'))
+        return d2.topk(self.k, dim=-1, largest=False).indices  # (B, C, k)
+
+    def forward(self, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        """x: (B, C, d)  pos: (B, C, 3) candidate positions"""
+        idx   = self._knn_idx(pos)
+        B, C, _ = x.shape
+        b_idx = torch.arange(B, device=x.device)[:, None, None]  # (B, 1, 1)
+
+        for conv, norm in zip(self.convs, self.norms):
+            x_nbr = x[b_idx.expand(B, C, self.k), idx]        # (B, C, k, d)
+            x_ctr = x.unsqueeze(2).expand_as(x_nbr)           # (B, C, k, d)
+            edge  = torch.cat([x_ctr, x_nbr - x_ctr], dim=-1) # (B, C, k, 2d)
+            agg   = conv(edge).max(dim=2).values               # (B, C, d)
+            x     = norm(x + agg)
+
+        return x
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 11):
         super().__init__()
@@ -77,6 +121,9 @@ class CandidateSelector(nn.Module):
         )
         self.cross_norm = nn.LayerNorm(d_model)
 
+        # GCN: candidate spatial graph re-ranking (B-group improvement)
+        self.cand_gcn = CandidateGCN(d_model, k=6, num_layers=1, dropout=dropout)
+
         # Scoring head: [seq_cls || cand_ctx || cand_feat_raw] → 1 logit per candidate
         self.head = nn.Sequential(
             nn.Linear(d_model * 2 + CAND_DIM, d_model),
@@ -89,6 +136,7 @@ class CandidateSelector(nn.Module):
         self,
         seq_feat:   torch.Tensor,        # (B, 11, SEQ_DIM)
         cand_feat:  torch.Tensor,        # (B, C, CAND_DIM)
+        cand_pos:   torch.Tensor = None, # (B, C, 3) candidate 3D positions for GCN
         return_reg: bool = False,
     ):
         # ── Sequence encoding ────────────────────────────────────────────────
@@ -104,6 +152,8 @@ class CandidateSelector(nn.Module):
         cand_h = self.cand_proj(cand_feat)                 # (B, C, d)
         ctx, _ = self.cross_attn(cand_h, seq_h, seq_h)    # (B, C, d)
         ctx    = self.cross_norm(cand_h + ctx)             # residual
+        if cand_pos is not None:
+            ctx = self.cand_gcn(ctx, cand_pos)             # (B, C, d)
 
         cls_exp = cls.unsqueeze(1).expand(-1, ctx.size(1), -1)   # (B, C, d)
         h       = torch.cat([cls_exp, ctx, cand_feat], dim=-1)   # (B, C, d*2+CAND_DIM)

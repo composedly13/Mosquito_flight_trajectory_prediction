@@ -59,7 +59,7 @@ def tta_oof_preds(models: dict, ids: list, coords: np.ndarray,
                     cands_t = make_candidates_gpu(c_in)
                     seq_t   = make_seq_features_gpu(c_in)
                     cand_t  = make_cand_features_gpu(c_in, cands_t)
-                    logits  = model(seq_t, cand_t)
+                    logits  = model(seq_t, cand_t, cands_t)
                     pred_r  = selector_predict(logits, cands_t, topk=topk)
                     # Unrotate back to original frame: pred_orig = pred_rot @ R
                     pred_orig = (pred_r.unsqueeze(1) @ R).squeeze(1)
@@ -84,7 +84,7 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
                 cands_t = make_candidates_gpu(c)
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
-                logits  = model(seq_t, cand_t)
+                logits  = model(seq_t, cand_t, cands_t)
                 pred    = selector_predict(logits, cands_t, topk=topk, temp=temp)
             preds[val_idx[start:end]] = pred.cpu().numpy()
     return preds
@@ -107,7 +107,7 @@ def get_oof_logits(models: dict, ids: list, coords: np.ndarray,
                 cands_t = make_candidates_gpu(c)
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
-                lgts    = model(seq_t, cand_t)
+                lgts    = model(seq_t, cand_t, cands_t)
             logits[val_pos[start:end]] = lgts.cpu().numpy()
     return logits
 
@@ -122,7 +122,7 @@ def load_all_models(seeds: list, device: torch.device) -> dict:
             path = model_dir / f"selector_fold{fold}.pt"
             if path.exists():
                 m = CandidateSelector().to(device)
-                m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+                m.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=False)
                 m.eval()
                 fold_models[fold] = m
         if fold_models:
@@ -164,7 +164,7 @@ def get_oof_preds_multiseed(
                 cands_t    = make_candidates_gpu(c)
                 seq_t      = make_seq_features_gpu(c)
                 cand_t     = make_cand_features_gpu(c, cands_t)
-                avg_logits = sum(m(seq_t, cand_t) for m in fold_models) / len(fold_models)
+                avg_logits = sum(m(seq_t, cand_t, cands_t) for m in fold_models) / len(fold_models)
                 pred       = selector_predict(avg_logits, cands_t, topk=topk, temp=temp)
             preds[val_pos[start:end]] = pred.cpu().numpy()
 
@@ -301,7 +301,7 @@ def oracle_selector_decomposition(
                 cands_t = make_candidates_gpu(c)
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
-                logits  = model(seq_t, cand_t)
+                logits  = model(seq_t, cand_t, cands_t)
             all_logits[val_idx[start:end]] = logits.cpu().numpy()
 
     # Oracle rank (0-based: 0 = top-1)
@@ -399,7 +399,7 @@ def analyze(seeds: list = None):
         path = model_dir / f"selector_fold{fold}.pt"
         if path.exists():
             m = CandidateSelector().to(device)
-            m.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+            m.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=False)
             m.eval()
             models[fold] = m
     if not models:

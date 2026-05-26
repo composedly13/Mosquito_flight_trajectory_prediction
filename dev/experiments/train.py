@@ -119,7 +119,7 @@ def train_fold(
             seq_f  = make_seq_features_gpu(coords_b)
             cand_f = make_cand_features_gpu(coords_b, cands)
 
-            logits, rough_delta = model(seq_f, cand_f, return_reg=True)  # (B,C), (B,3)
+            logits, rough_delta = model(seq_f, cand_f, cands, return_reg=True)  # (B,C), (B,3)
             soft = soft_labels(cands, true)                               # (B, C)
 
             # Phase 11 Step 2: soft-CE + PW + LML + REG (auxiliary regression)
@@ -157,7 +157,7 @@ def train_fold(
                 seq_f  = make_seq_features_gpu(coords_b)
                 cand_f = make_cand_features_gpu(coords_b, cands)
 
-                logits = model(seq_f, cand_f)
+                logits = model(seq_f, cand_f, cands)
                 pred   = selector_predict(logits, cands, topk=TOPK)
                 preds.append(pred.cpu().numpy())
                 trues.append(batch["label"].cpu().numpy())

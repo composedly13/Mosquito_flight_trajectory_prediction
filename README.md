@@ -362,6 +362,9 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Phase 11 Step 3: 54-cand + latency_s060/065 (seed42) | 54 | 0.6442 ± 0.0076 | 75.78% | 85.0% | 0.6443 | ❌ OOF −0.21pp — family_id 없어도 극단 감속 후보가 efficiency 저하 → 영구 제거 |
 | **Phase 11: 3-seed 앙상블 (42+777+123), temp=1.0** | **52** | — | 75.41% | — | — | **LB 0.6692** ❌ Phase 7 best(0.6716) 하회 −0.24pp |
 | **Phase 12: BiLSTM C-group + routing 13.4% (seeds 42+777+123)** | 52 | — | 75.41% | — | ~0.625 | **LB 0.6588** ❌ routing 오발동 → A+B 오염. C-group OOF 0.62%→3.54% 개선 확인 |
+| **Phase 13 GCN seed42 (단독)** | 52 | — | 75.41% | **86.3%** | **0.6506** | GCN(EdgeConv k=6) 추가 → +0.42pp OOF (0.6464→0.6506) |
+| Phase 13 GCN 3-seed base (42+777+123) | 52 | — | 75.41% | 86.1% | ~0.6506 | **LB 0.6688** ❌ Phase 7 single(0.6712) 하회 — GCN 오버피팅 |
+| Phase 13 blend (GCN + C-gate + GRUResidual) | 52 | — | 75.41% | — | ~0.6516 | **LB 0.6674** ❌ C-gate도 LB 기여 없음 (OOF +0.10pp만 확인) |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -2082,25 +2085,118 @@ routing 4.5% 기준:
 
 ---
 
-### 다음 실험 계획 (Phase 13)
+### 2026-05-26 (4)
 
-**목표: LB 0.68+**
+**[Phase 13: GCN CandidateSelector + C-gate + GRUResidual — LB 0.6688 / 0.6674]**
+
+**GCN 아키텍처 구현**
+
+기존 CandidateSelector의 cross-attention 이후 GCN 레이어 1개 추가 (end-to-end):
+
+```python
+# model.py: CandidateSelector 내 추가
+class CandidateGCN(nn.Module):
+    """EdgeConv-style GCN: KNN 그래프(k=6) + message passing"""
+    # 입력: cand_feat (B, C, d_model)
+    # 출력: cand_feat_updated (B, C, d_model)  — 후보 간 공간 관계 반영
+```
+
+목적: 52개 후보가 독립 채점 → oracle 후보와 인접한 "유사 decoy"를 구분 못하는 B-group 병목 해소  
+GCN이 이웃 후보 간 상대 관계(거리, 방향)를 message passing → oracle 후보의 공간적 고유성 강화.
+
+**3-seed 학습 결과 (GCN 추가 후)**
+
+| seed | OOF | 이전 (Phase 11) | 변화 | Oracle efficiency |
+|---:|---:|---:|---:|---:|
+| 42 | **0.6506** | 0.6464 | **+0.42pp ✅** | 86.3% |
+| 777 | ~0.6477 | ~0.6464 | +0.13pp ✅ | 85.9% |
+| 123 | ~0.6490 | ~0.6464 | +0.26pp ✅ | 86.1% |
+
+**Phase 13 C-gate 파이프라인**
+
+3단계 순차 실행:
+
+```bash
+python export_oof_phase13.py --seeds 42 777 123   # 멀티-seed OOF 저장
+python train_c_gate.py                             # CClassifier (C vs non-C)
+python train_residual_c.py                         # GRUResidual (C-only 잔차 보정)
+```
+
+**C-gate (CClassifier) 결과**
+
+| 지표 | 값 |
+|---|---|
+| OOF ROC-AUC | **0.7516** |
+| thresh=0.70: prec | 0.6661 |
+| thresh=0.70: rec | 0.1671 |
+| physics_routing rec (비교) | 0.1171 (동등 precision에서 열위) |
+| pos_weight | 3.07 (class imbalance 보정) |
+
+- 25개 meta feature: 11d last-step seq_feat + 5d last-3-step 집계 + 4d logit 기반(entropy H, logit_gap, top1_prob, top5_prob_sum) + 3d candidate spread + 2d physics divergence
+- 멀티-seed OOF 일관성: C-gate 학습 시 multi-seed avg logit 사용 → test-time 분포와 동일
+
+**GRUResidual 결과**
+
+| 지표 | 값 |
+|---|---|
+| 구조 | BiGRU(hidden=64, layers=2) + base_delta(3) 입력 |
+| base_delta | base_pred − p0 (방향 정보 주입 — 핵심 fix) |
+| 보정 범위 | ±6mm clamp |
+| OOF 전체 | **+0.10pp** |
+| OOF near-C (1~1.5cm) | +0.85pp |
+| OOF hard-C (>1.5cm) | ≈0 (미개선) |
+| OOF non-C | ±0 (보존) |
+
+base_delta 없이 seq_feat만 입력 시 epoch 1에서 정체(patience 소진) → 평균 delta 수렴 문제.  
+base_delta = base_pred − p0 추가로 per-sample 방향 보정 가능.
+
+**LB 제출 결과 및 분석**
+
+| 파일 | 구성 | OOF | **LB** |
+|---|---|---:|---:|
+| base (GCN, 3-seed) | selector만 | ~0.6506 | **0.6688** ❌ |
+| blend (C-gate+GRU) | + 4.9% C-gate routing | ~0.6516 | **0.6674** ❌ |
+| Phase 7 best (비교) | 2-seed, no GCN | 0.6484 | **0.6716** |
+
+**핵심 발견: OOF/LB 역전**
+
+| 추가 요소 | OOF 변화 | LB 변화 | 결론 |
+|---|---:|---:|---|
+| GCN (vs Phase 11 3-seed) | +0.42pp (seed42) | **−0.004** | GCN 오버피팅 |
+| C-gate + GRUResidual | +0.10pp | **−0.0014** | C-gate도 오버피팅 |
+
+- 10K 학습 샘플에서 GCN(추가 파라미터) + C-gate + GRUResidual 3-stage 구조가 train/test 분포 차이를 메우지 못함
+- OOF가 높아도 LB 역행 → 다음 Phase에서 단순화 + 데이터 증강 강화 필요
+
+**신규 파일**
+
+| 파일 | 내용 |
+|---|---|
+| `export_oof_phase13.py` | 멀티-seed OOF 저장 (oof_preds, logits, seq_feat, oracle_cands, c_labels 등) |
+| `features_phase13.py` | `make_c_meta_features()` — 25차원, y_true 비의존 |
+| `train_c_gate.py` | CClassifier 5-fold 학습 |
+| `train_residual_c.py` | GRUResidual C-group 전용 잔차 학습 |
+| `predict_phase13.py` | GCN selector + C-gate + GRUResidual 통합 inference |
+
+---
+
+### 다음 실험 계획 (Phase 14)
 
 **현황**
 
 | 항목 | 값 |
 |---|---|
-| Best LB | **0.6716** (Phase 5/7, 2-seed 42+777) |
-| B-group 비율 | 48.0% → **핵심 병목** |
-| C-group 비율 | 24.6% → LSTM으로 부분 커버 (3.54%, 추가 개선 필요) |
-| Oracle ceiling | 75.41% (52-cand) |
+| Best LB | **0.6716** (Phase 5/7, 2-seed 42+777, GCN 없음) |
+| Phase 13 GCN LB | 0.6688 (−0.0028 vs best) |
+| Phase 13 blend LB | 0.6674 |
+| OOF/LB 역전 원인 | GCN + C-gate 오버피팅 (10K 샘플 부족) |
 
-**Phase 13 방향: GCN Candidate Re-ranker (B-group 개선)**
-
-B-group 병목 원인: 52개 후보가 독립 채점 → oracle 후보와 인접한 "유사 decoy"를 구분 못함
+**Phase 14 방향: GCN 오버피팅 원인 분석 + 데이터 증강**
 
 | 방향 | 내용 | 기대 효과 |
 |---|---|---|
-| **GCN candidate graph** | 후보 간 KNN 그래프 + GCN message passing → oracle 후보의 공간적 고유성 강화 | B-group 개선 → efficiency ↑ |
-| 구조 | cross-attn 이후 GCN 1~2 layer 추가 (end-to-end) | 파라미터 최소 증가 |
+| GCN 없이 3-seed 재확인 | Phase 11 원래 아키텍처 + 3-seed 앙상블 | GCN 제거만으로 LB 0.6716+ 가능한지 확인 |
+| **데이터 증강 강화** | 현재 yaw-only → 추가 증강 탐색 (noise 주입, jitter, mirror) | 10K 샘플 다양성 증가 → 오버피팅 완화 |
+| GCN 정규화 | dropout ↑, weight decay ↑, 레이어 수 감소 | GCN 복잡도 낮춰 오버피팅 억제 |
+| test set 분포 분석 | train OOF vs LB 갭 패턴 — 어떤 샘플 유형이 LB에서 다른지 | 증강 방향 결정 |
 | 그래프 | 후보 간 거리 기반 KNN (k=5~8) | 물리적 유사 후보 클러스터 구분 |
