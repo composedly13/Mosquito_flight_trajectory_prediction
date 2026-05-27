@@ -31,7 +31,6 @@ from config import (
 from dataset import load_all
 from model import CandidateSelector, selector_predict
 from candidates import make_candidates_gpu, make_seq_features_gpu, make_cand_features_gpu
-from boundary import BoundaryMLP, apply_boundary
 from regression import (
     load_reg_models, predict_reg_batch,
     load_reg2_models, predict_reg2_batch,
@@ -57,15 +56,6 @@ def load_selectors(seeds: list, device: torch.device) -> list:
     return models
 
 
-def load_boundary(device: torch.device):
-    path = OUTPUT_DIR / "boundary.pt"
-    if not path.exists():
-        return None
-    m = BoundaryMLP().to(device)
-    m.load_state_dict(torch.load(path, map_location=device))
-    m.eval()
-    return m
-
 
 def predict(
     seeds: list = None,
@@ -81,7 +71,6 @@ def predict(
     print(f"Device: {device}  |  Seeds: {seeds}")
 
     selectors = load_selectors(seeds, device)
-    boundary  = load_boundary(device)
 
     # LSTM 모델 로드 (--lstm 플래그)
     lstm_models = []
@@ -99,13 +88,8 @@ def predict(
         reg2_seed_models = load_reg2_models(seeds, device)
         reg_models_flat  = [m for fl in reg2_seed_models.values() for m in fl]
         reg2_label = "reg2"
-    if not reg_models_flat:
-        # Fallback: legacy RegMLP
-        print("  RegMLP 모델 확인 (fallback)...")
-        reg_seed_models = load_reg_models(seeds, device)
-        reg_models_flat = [m for fl in reg_seed_models.values() for m in fl]
-        reg2_label = "regmlp"
-
+    # RegMLP fallback 제거 — Phase 5에서 OOF 0.0681로 완전 실패 확인
+    # blend는 --reg2 플래그 명시 시에만 활성화
     use_blend = len(reg_models_flat) > 0
 
     ids, coords, _ = load_all(TEST_DIR)
@@ -187,17 +171,6 @@ def predict(
         save_csv(blended, blend_name)
         print(f"  ※ entropy blend [{reg2_label}] β={beta}  (β 조정: --beta 값)")
 
-    # 5. Boundary (이전 실험 잔재, 피처 불일치 시 skip)
-    if boundary is not None:
-        try:
-            all_coords = np.concatenate([
-                coords[s:min(s + BATCH_SIZE, N)]
-                for s in range(0, N, BATCH_SIZE)
-            ], axis=0)
-            corrected = apply_boundary(boundary, all_coords, all_preds, device)
-            save_csv(corrected, "submission_boundary.csv")
-        except RuntimeError as e:
-            print(f"  boundary skip (피처 불일치): {e}")
 
 
 if __name__ == "__main__":

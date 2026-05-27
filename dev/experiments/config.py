@@ -18,7 +18,7 @@ BATCH_SIZE  = 256
 EPOCHS      = 1000
 LR          = 3e-4
 WEIGHT_DECAY = 1e-4
-PATIENCE    = 300       # seed123 수렴 불안정 대비 충분한 patience
+PATIENCE    = 300       # 다음 실험부터 적용 (CosineAnnealingLR T_max=1000 충분한 LR decay)
 
 # Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
 # yaw-only: z=UP 보존, SO3보다 +4.8pp 확인

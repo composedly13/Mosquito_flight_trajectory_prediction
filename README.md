@@ -296,7 +296,7 @@ python dev/experiments/predict.py --seeds 42 123 777
 | Oracle ceiling | **75.41%** (52-cand) |
 | Selector efficiency | **85.7%** |
 | Oracle rank mean | **15.8** (Phase 7 13.3 대비 소폭 악화) |
-| LB (best) | **0.6716** (Phase 5, 2-seed 42+777, β=0.0 selector-only) |
+| LB (best) | **0.6732** (Phase 5 재확립, 2-seed 42+777, temp=2.0, 2026-05-27) |
 | Phase 11 3-seed LB | **0.6692** (42+777+123, −0.24pp vs best) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
 
@@ -365,6 +365,9 @@ python dev/experiments/predict.py --seeds 42 123 777
 | **Phase 13 GCN seed42 (단독)** | 52 | — | 75.41% | **86.3%** | **0.6506** | GCN(EdgeConv k=6) 추가 → +0.42pp OOF (0.6464→0.6506) |
 | Phase 13 GCN 3-seed base (42+777+123) | 52 | — | 75.41% | 86.1% | ~0.6506 | **LB 0.6688** ❌ Phase 7 single(0.6712) 하회 — GCN 오버피팅 |
 | Phase 13 blend (GCN + C-gate + GRUResidual) | 52 | — | 75.41% | — | ~0.6516 | **LB 0.6674** ❌ C-gate도 LB 기여 없음 (OOF +0.10pp만 확인) |
+| **Phase 5 재확립 seed42 (P=40, no GCN)** | 50★ | — | 77.02% | 84.1% | **0.6478** | cuDNN 비결정성 — G2 완전 재현 불가. std=0.0062 |
+| **Phase 5 재확립 seed777 (P=80, no GCN)** | 50★ | — | 77.02% | 84.1% | **0.6479** | P=80으로 Fold5 0.6355→0.6461 회복. std=0.0012 (매우 안정) |
+| **2-seed 앙상블 (42+777), temp=2.0** | 50★ | — | 77.02% | 84.1% | ~0.6480 | **LB 0.6732** ✅ 전체 신기록 (+0.0016 vs 0.6716) |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -2180,53 +2183,99 @@ base_delta = base_pred − p0 추가로 per-sample 방향 보정 가능.
 
 ---
 
-### 다음 실험 계획 (Phase 14)
+### 2026-05-27 (1)
+
+**[Phase 14 회귀 → Phase 5 Baseline 재확립]**
+
+**배경**
+
+Phase 13 GCN + Phase 14 증강 시도 후 Phase 5 구조(GCN 없음)로 revert. model.py는 Phase 5 회귀 구조(Smart 50-cand, CAND_DIM=10)로 돌아왔으나 seed42/777 가중치가 Phase 13 GCN 구조로 저장돼있어 재학습 필요.
+
+**cuDNN 비결정성 확인**
+
+재학습 과정에서 `torch.manual_seed(777)` + `np.random.seed(777)` 설정에도 불구하고 Phase G2 결과와 차이 발생. 원인: `torch.backends.cudnn.deterministic = True` 미설정으로 GPU 커널 실행 순서가 매 실행마다 달라짐 → **동일 seed라도 결과 재현 불가**.
+
+```python
+# 완전 재현에 필요하지만 현재 미적용 (속도 저하)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+```
+
+**PATIENCE 실험: CosineAnnealingLR 상호작용 분석**
+
+`T_max=1000` 코사인 스케줄에서 `PATIENCE=40`으로 epoch ~86에서 종료 시 LR이 초기값의 96% 수준 → LR annealing 효과 없음. `PATIENCE=80`으로 변경 후 seed777 Fold 5가 0.6355 → 0.6461로 크게 회복됨.
+
+| PATIENCE | 종료 시점 | LR 수준 | 효과 |
+|---|---|---|---|
+| 40 | ~epoch 86 | ~96% | fine-tuning 효과 없음 |
+| 80 | ~epoch 150 | ~93% | Fold 5 등 약한 fold 일부 회복 |
+| **300** | **~epoch 350** | **~73%** | **다음 실험부터 적용 (config.py 기본값)** |
+
+**최종 재학습 결과 (2-seed 기준)**
+
+| seed | PATIENCE | Fold1 | Fold2 | Fold3 | Fold4 | Fold5 | OOF | Efficiency |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 42 | 40 | 0.6530 | 0.6502 | 0.6533 | 0.6460 | 0.6365 | **0.6478** | 84.1% |
+| 777 | 80 | 0.6480 | 0.6483 | 0.6497 | 0.6475 | 0.6461 | **0.6479** | 84.1% |
+
+- seed777 std = **0.0012** (매우 안정적)
+- Oracle R-Hit: 0.7702 (Smart 50-cand)
+- 예상 2-seed 앙상블 OOF: ~0.6480, 예상 LB: ~0.670~0.671
+
+**버그 수정**
+
+| 파일 | 버그 | 수정 |
+|---|---|---|
+| `predict.py` | `from boundary import BoundaryMLP, apply_boundary` — config에서 상수 제거 후 ImportError | import 및 관련 코드 전체 제거 |
+| `predict.py` | RegMLP 자동 fallback 로드 — seed42에 RegMLP 없을 때 오류 + Phase 5에서 OOF 0.0681로 무용 확인된 blend가 자동 활성화 | fallback 로드 코드 제거, `--reg2` 명시 시에만 blend 활성화 |
+
+---
+
+### 다음 실험 계획 (Phase 15)
 
 **현황**
 
 | 항목 | 값 |
 |---|---|
-| Best LB | **0.6716** (Phase 5/7, 2-seed 42+777, GCN 없음) |
-| Phase 13 GCN base LB | 0.6688 (−0.0028 vs best) |
-| Phase 13 blend LB | 0.6674 |
-| OOF/LB 역전 원인 | GCN + C-gate 오버피팅 (10K 샘플 부족) |
+| Best LB | **0.6732** (Phase 5 재확립, 2-seed 42+777, Smart 50-cand, GCN 없음) |
+| Phase 5 재확립 (2-seed) | OOF ~0.6480, **LB 0.6732** (전체 신기록) |
+| 복잡도 추가 실험 전체 결과 | Phase 7~13 모두 LB 0.6716 하회 → 구조 복잡화는 10K 샘플에서 오버피팅 유발 |
+| PATIENCE | **300** (다음 실험부터, CosineAnnealingLR LR decay 충분히 확보) |
 
-**Phase 14 방향: 데이터 증강으로 GCN 오버피팅 억제**
+**Phase 15 방향: 구조 동결 + 데이터 증강**
 
-GCN/LSTM 등 추가 파라미터를 유지하되, 학습 데이터 다양성을 높여 오버피팅을 완화한다.
+모델 구조 변경 없이 (GCN/AuxHead 제외) 학습 데이터 다양성만 확대. 증강 코드는 이미 구현 완료 (`dataset.py`).
 
-**구현 완료: 추가 증강 2종**
+| 증강 | 설정 | 설명 |
+|---|---|---|
+| **x/y mirror flip** | `AUG_FLIP=True`, prob=0.5 각 축 독립 | x(forward)/y(left) 반전 4조합, z(up)=중력 방향 미적용 |
+| **Coordinate noise** | `AUG_NOISE=True`, `NOISE_STD=0.001` (1mm) | 입력 좌표 Gaussian jitter, 라벨은 clean 유지 |
 
-| 증강 | 구현 위치 | 설정값 | 설명 |
-|---|---|---|---|
-| **x/y mirror flip** | `dataset.py` `augment_mirror_gpu()` | `AUG_FLIP=True`, prob=0.5 독립 | x(forward)/y(left) 각 축 독립 반전 → 4가지 조합, 실질 4× 다양성. z(up)는 중력 방향이므로 미적용 |
-| **Coordinate noise** | `dataset.py` `augment_noise_gpu()` | `AUG_NOISE=True`, `NOISE_STD=0.001` | 입력 좌표에 1mm Gaussian jitter, 라벨은 clean 유지. LiDAR 측정 노이즈 시뮬레이션 |
+적용 순서: `yaw → flip → noise`
 
-적용 순서: `yaw → flip → noise` (train 배치마다 on-the-fly)
-
-**다음 실행 명령 (RTX 5080 데스크탑)**
+**다음 실행 명령**
 
 ```bash
+# config.py: AUG_FLIP=True, AUG_NOISE=True, PATIENCE=300 확인 후
 python dev/experiments/train.py --seed 42
 python dev/experiments/train.py --seed 777
-python dev/experiments/train.py --seed 123
-python dev/experiments/predict.py --seeds 42 777 123 --temp 2.0
+python dev/experiments/predict.py --seeds 42 777 --temp 2.0
 ```
 
 **성공 기준**
 
 | 지표 | 목표 |
 |---|---|
-| OOF (seed42) | ≥ 0.6506 (Phase 13 GCN 동등 이상) |
-| LB (3-seed) | **> 0.6716** (Phase 5/7 best 돌파) |
+| OOF (seed42) | ≥ 0.6480 (Phase 5 재확립 동등 이상) |
+| LB (2-seed) | **> 0.6716** (현재 best 돌파) |
 
-OOF가 Phase 13과 비슷하면서 LB가 오르면 → 증강이 오버피팅을 실제로 줄인 것.  
-OOF도 같이 오르면 → 증강이 일반화 + 학습 둘 다 개선.
+OOF 유지 + LB 상승 → 증강이 오버피팅 억제 효과 확인.  
+OOF 하락 → 증강 강도 조정 (NOISE_STD 0.0005 / flip 단독 / 비활성화).
 
 **이후 탐색 후보 (결과에 따라)**
 
 | 방향 | 조건 |
 |---|---|
-| C-gate / GRUResidual 재학습 | Phase 14 base LB > 0.6716 확인 후 |
-| NOISE_STD 튜닝 (0.5mm / 2mm) | OOF 변화 없을 시 |
-| GCN dropout 강화 | LB 여전히 역전 시 |
+| seed123 추가 3-seed 앙상블 | LB > 0.6716 확인 후 |
+| NOISE_STD 튜닝 (0.0005 / 0.002) | OOF 변화 없을 시 |
+| flip 단독 / noise 단독 분리 실험 | 복합 증강이 효과 없을 시 |
