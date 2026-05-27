@@ -18,7 +18,7 @@ BATCH_SIZE  = 256
 EPOCHS      = 1000
 LR          = 3e-4
 WEIGHT_DECAY = 1e-4
-PATIENCE    = 300       # 다음 실험부터 적용 (CosineAnnealingLR T_max=1000 충분한 LR decay)
+PATIENCE    = 300        # Phase 5 재확립 기준 (seed42=40, seed777=80 — train.py --patience 80으로 오버라이드)
 
 # Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
 # yaw-only: z=UP 보존, SO3보다 +4.8pp 확인

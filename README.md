@@ -102,41 +102,30 @@ MISS 케이스는 급격한 방향 전환이 원인 — 속도(+20%), 가속도(
               → Top-10 가중 평균 예측 → 최종 예측 (N, 3)
 ```
 
-### CandidateSelector 상세
+### CandidateSelector 상세 (Phase 5 재확립 기준)
 
 | 컴포넌트 | 구성 |
 |---|---|
 | seq_proj | Linear(11 → 128) |
 | PositionalEncoding | Embedding(11, 128) |
 | TransformerEncoder | d_model=128, nhead=4, layers=3, norm_first=True |
-| cand_proj | Linear(**11** → 128) |
-| cross_attn | MultiheadAttention(candidates → sequence) |
-| **cand_self_attn** | **MultiheadAttention(candidates → candidates) — 후보 간 상대 비교** |
-| head | Linear(128×2+**11** → 128) → GELU → Linear(128 → 1) per candidate |
+| cand_proj | Linear(**10** → 128) |
+| cross_attn | MultiheadAttention(candidates ← sequence) |
+| head | Linear(128×2+**10** → 128) → GELU → Linear(128 → 1) per candidate |
 
-### TransformerRegressor (C-group 보조 모델)
-
-```
-입력: seq_feat (11, 11) — 후보 불필요
-출력: p0 + Δ (3D offset 직접 예측)
-구조: CandidateSelector와 동일한 TransformerEncoder → head → Linear(128 → 3)
-```
-
-- C-group 전용 직접 회귀 모델 (entropy-based blend 용도)
-- 현재 실험 결과: C-group R-Hit@1cm = 0.62% (1cm 임계값 기준 거의 무효)
-- entropy H ≈ 0.986 (54개 후보 → 구조적으로 항상 최대 엔트로피) → blend 비활성화 상태
+> Phase 8의 `cand_self_attn` (candidates→candidates) 및 Phase 11의 Auxiliary Reg Head는 실험 후 제거됨.
 
 ### 손실 함수
 
 ```
-L = L_softCE + 0.25 × L_pairwise + 0.05 × L_listMLE
+L = L_softCE + 0.25 × L_pairwise + 0.10 × L_listMLE
 
 L_softCE   : soft label cross-entropy (거리 기반 타겟 분포, temp=0.005)
 L_pairwise : good candidate > bad candidate 랭킹 손실 (margin=0.12)
-L_listMLE  : -log P(oracle ranked #1) — oracle 후보 직접 최적화
+L_listMLE  : -log P(oracle ranked #1) — oracle 후보 직접 최적화 (0.10이 optimal)
 ```
 
-### 후보 생성 (Candidates)
+### 후보 생성 (Candidates) — Smart 50-cand
 
 Frenet 프레임으로 가속도와 jerk를 분해하여 50개 물리적으로 타당한 후보 생성:
 
@@ -147,13 +136,14 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 | 계열 | 수 | 설명 |
 |---|---|---|
 | Base | 1 | 순수 선형 외삽 |
-| Acceleration | 4 | 가속도 보정 |
-| Frenet | 10 | 접선/법선 방향 세밀 분해 (중복 제거) |
-| Turn | 13 | 방향 전환 (|perp| 0.20~0.80) — C그룹 기반 극단 강화 |
-| Jerk | 6 | 순간 가속도 변화 (|jerk| 0.08~0.80) — C그룹 기반 강화 |
-| Latency | **20** | 시스템 지연 보정 (0.60~1.20×) + turn 복합 — **s060/s065 추가** |
+| Acceleration | 2 | 가속도 보정 (acc_040/050 제거) |
+| Frenet | 15 | 접선/법선 방향 (중복 4개 제거 + par130 추가) |
+| Turn | 10 | 방향 전환 (|perp| 0.30~0.80) — p070/n070/p080/n080 추가 |
+| Jerk | 8 | jerk=±0.15~0.80 (small±0.08 제거, xxl±0.80 추가) |
+| Latency | 9 | 시스템 지연 보정 (s075/s080/l120 추가, s088/l112 제거) |
+| Turn+Jerk | 5 | 복합 후보 |
 
-**cand_feat 피처 구성 (CAND_DIM=11)**
+**cand_feat 피처 구성 (CAND_DIM=10)**
 
 | # | 피처 | 설명 |
 |---|---|---|
@@ -167,30 +157,31 @@ pred = p0 + d1·t·v + par·t²·acc_par + perp·t²·acc_perp + jerk·t²·jerk
 | 7 | jerk | jerk 파라미터 |
 | 8 | time_scale | 시간 스케일 보정 파라미터 |
 | 9 | acc_par_s | 시퀀스 기반 접선 가속도 |
-| **10** | **family_id/5** | **후보 계열 타입 (base/acc/frenet/turn/jerk/latency)** |
+
+> `family_id/5` (CAND_DIM=11) 는 Phase 8에서 −0.73pp 확인 후 영구 제거.
 
 ### 학습 전략
 
 | 항목 | 설정 |
 |---|---|
 | K-Fold | 5-Fold (MD5 해시 기반 안정적 분할) |
-| 데이터 증강 | **yaw + speed-scale** (z축 회전 + p0 기준 이동량 스케일, z=UP 보존) |
+| 데이터 증강 | **yaw-only** (z축 회전, z=UP 보존 — speed-scale −0.24pp 확인 후 제거) |
 | 옵티마이저 | AdamW (lr=3e-4, weight_decay=1e-4) |
-| 스케줄러 | CosineAnnealingLR (T_max=EPOCHS, epoch 단위 step) |
-| Early Stopping | patience=40 |
+| 스케줄러 | CosineAnnealingLR (T_max=1000, epoch 단위 step) |
+| Early Stopping | seed42: patience=40, seed777: patience=80 (`--patience` CLI 제어) |
 | Boundary MLP | **완전 제거** (OOF −7.9pp, 오차 벡터 방향 학습 불가) |
 
 ### 원본(PB 0.6822) 대비 개선점
 
-| 항목 | 원본 | 현재 |
+| 항목 | 원본 | 현재 (Phase 5 기준) |
 |---|---|---|
 | 셀렉터 | Attn-GRU | **Transformer + Cross-Attention** |
-| 후보 수 | 28개 | **50개** |
+| 후보 수 | 28개 | **50개 (Smart 50-cand)** |
 | Seq features | — | **11개** (jerk_abs, acc_cos 추가) |
-| 학습 | 단일 모델 | **5-Fold 앙상블, multi-seed 지원** |
-| 증강 | 없음 | **yaw + speed-scale** (z=UP 보존 + 속도 스케일 일반화) |
-| 손실 | CE | **Soft-CE + Pairwise + ListMLE** |
-| Top-k 예측 | Top-1 (argmax) | **Top-10 가중 평균** |
+| 학습 | 단일 모델 | **5-Fold × 2-seed 앙상블 (seed42+777)** |
+| 증강 | 없음 | **yaw-only** (z=UP 보존) |
+| 손실 | CE | **Soft-CE + Pairwise×0.25 + ListMLE×0.10** |
+| Top-k 예측 | Top-1 (argmax) | **Top-10 가중 평균, temp=2.0** |
 | Boundary | 전체 데이터 적용 | **완전 제거** (−7.9pp 확인) |
 
 ---
@@ -253,52 +244,75 @@ $env:KMP_DUPLICATE_LIB_OK = "TRUE"
 ```bash
 # 데이터 준비: data/ 폴더에 대회 데이터 압축 해제
 
-# ── 단일 seed 학습 (기본: seed=42) ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# ★ LB 0.6732 BASELINE 재현 (Phase 5 재확립, 2-seed 42+777)
+# ══════════════════════════════════════════════════════════════════════════════
 cd D:\Mosquito
-python dev/experiments/train.py              # seed=42 (config.SEED 기본값)
-python dev/experiments/train.py --seed 123   # 다른 seed
-# → dev/experiments/outputs/seed{N}/selector_fold{0..4}.pt
+# Step 1: seed42 학습 (patience=40)
+python dev/experiments/train.py --seed 42 --patience 40
+# Step 2: seed777 학습 (patience=80, Fold5 안정화)
+python dev/experiments/train.py --seed 777 --patience 80
+# Step 3: 2-seed 앙상블 추론 (temp=2.0 기본값)
+python dev/experiments/predict.py --seeds 42 777
+# → dev/experiments/outputs/submission.csv  (LB 0.6732 재현 목표)
 
-# ── 진단 (OOF 분석 — 학습 후 실행) ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 일반 사용
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 단일 seed 학습 ─────────────────────────────────────────────────────────────
+python dev/experiments/train.py              # seed=42, patience=40 (config 기본값)
+python dev/experiments/train.py --seed 777 --patience 80  # seed777은 patience=80 권장
+
+# ── 진단 (OOF 분석 — 학습 후 실행) ───────────────────────────────────────────
 python dev/experiments/analyze.py            # seed=42 기준
-python dev/experiments/analyze.py --seed 123
-python dev/experiments/analyze.py --seeds 42 123 777  # multi-seed OOF 비교 (섹션 7)
+python dev/experiments/analyze.py --seed 777
+python dev/experiments/analyze.py --seeds 42 777  # 2-seed OOF 비교
 
-# ── 추론 및 제출 파일 생성 ────────────────────────────────────────────────────
-python dev/experiments/predict.py            # seed=42 단일
-python dev/experiments/predict.py --seed 123
-python dev/experiments/predict.py --seeds 42 123 777  # 3-seed ensemble (15 models)
+# ── 추론 및 제출 파일 생성 ──────────────────────────────────────────────────────
+python dev/experiments/predict.py --seeds 42 777    # ★ 2-seed baseline (temp=2.0 기본)
+python dev/experiments/predict.py --seed 42         # 단일 seed
+python dev/experiments/predict.py --seeds 42 777 --temp 1.0  # temp 변경 실험
 # → dev/experiments/outputs/submission.csv
-
-# ── 3-seed 앙상블 전체 학습 ──────────────────────────────────────────────────
-python dev/experiments/train.py --seed 42
-python dev/experiments/train.py --seed 123
-python dev/experiments/train.py --seed 777
-python dev/experiments/predict.py --seeds 42 123 777
 ```
 
 ---
 
-## 현재 파이프라인 (Current Default)
+## 현재 파이프라인 (Current Default) — Phase 5 재확립 기준
 
-| 항목 | 현재 설정 |
-|---|---|
-| Candidates | **52개** (Phase 11 기준 — latency_s075/s080 포함, s060/s065 영구 제거) |
-| Cand features | **CAND_DIM=10** (family_id/5 영구 제거 — Phase 8 대비 −0.73pp 확인) |
-| Augmentation | **yaw-only** |
-| Selector | Transformer + Cross-Attention + **Auxiliary Reg Head** (d_model=128, 3 layers) |
-| Seq features | **11개** (SEQ_DIM=11) |
-| Loss | **soft-CE + PW×0.25 + LML×0.05 + smooth_l1_reg×0.5** (Phase 11 Step 2) |
-| Prediction | **Top-10** weighted average, temp=1.0 |
-| Boundary MLP | **완전 제거** |
-| TTA | **효과 없음** (TTA×8 → ±0.00pp) |
-| OOF (seed42, Phase 11) | **0.6464** (Phase 7 0.6510 대비 −0.46pp — single seed 기준) |
-| Oracle ceiling | **75.41%** (52-cand) |
-| Selector efficiency | **85.7%** |
-| Oracle rank mean | **15.8** (Phase 7 13.3 대비 소폭 악화) |
-| LB (best) | **0.6732** (Phase 5 재확립, 2-seed 42+777, temp=2.0, 2026-05-27) |
-| Phase 11 3-seed LB | **0.6692** (42+777+123, −0.24pp vs best) |
-| Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 |
+> **현재 최고 LB: 0.6732** (2026-05-27, 2-seed 42+777, temp=2.0)
+> 이후 모든 실험은 이 baseline과 비교해야 합니다.
+
+| 항목 | 현재 설정 | 비고 |
+|---|---|---|
+| Candidates | **50개 (Smart 50-cand)** | Oracle 77.02% |
+| Cand features | **CAND_DIM=10** | family_id/5 제거 (−0.73pp 확인) |
+| Augmentation | **yaw-only** | speed-scale −0.24pp → 제거 |
+| Selector | Transformer + Cross-Attention (d_model=128, 3 layers) | GCN/reg_head 없음 |
+| Seq features | **11개** (SEQ_DIM=11) | jerk_abs, acc_cos 포함 |
+| Loss | **soft-CE + PW×0.25 + LML×0.10** | LML grid: 0.0→0.05→**0.10**→0.20 |
+| Prediction | **Top-10** weighted average, **temp=2.0** | temp=2.0이 LB 최적 |
+| Boundary MLP | **완전 제거** | OOF −7.9pp 확인 |
+| TTA | **효과 없음** | TTA×8 → ±0.00pp |
+| OOF (seed42, Phase 5 재확립) | **0.6478** (std=0.0062) | cuDNN 비결정성으로 G2 완전 재현 불가 |
+| OOF (seed777, Phase 5 재확립) | **0.6479** (std=0.0012) | P=80으로 Fold5 회복, 매우 안정 |
+| Oracle ceiling | **77.02%** (Smart 50-cand) | |
+| Selector efficiency | **84.1%** (2-seed 앙상블 기준) | |
+| **LB (current best)** | **0.6732** ✅ | seed42(P=40)+seed777(P=80), temp=2.0 |
+| Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 | |
+| Patience CLI | `python train.py --patience 80` | seed777 재현 시 필수 |
+
+### ⚠️ Phase 11은 실험 기록이며 current default가 아닙니다
+
+Phase 11 (52-cand + Auxiliary Reg Head + LML×0.05 + temp=1.0)은 아래 이유로 Phase 5보다 열위 확인:
+
+| 지표 | Phase 5 (current best) | Phase 11 3-seed LB |
+|---|---|---|
+| LB | **0.6732** ✅ | 0.6692 (−0.0040) |
+| Oracle | **77.02%** | 75.41% |
+| OOF | 0.6478~0.6479 | 0.6464 |
+
+Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 
 ---
 

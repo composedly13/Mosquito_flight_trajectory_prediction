@@ -79,6 +79,7 @@ def train_fold(
     coords: np.ndarray,
     labels: np.ndarray,
     device: torch.device,
+    patience: int = PATIENCE,
 ):
     val_mask   = np.array([fold_id(i) == fold for i in ids])
     train_mask = ~val_mask
@@ -169,18 +170,18 @@ def train_fold(
 
         pbar.set_postfix(hit=f"{hit:.4f}", best=f"{best_hit:.4f}", patience=patience_cnt)
 
-        if patience_cnt >= PATIENCE:
+        if patience_cnt >= patience:
             print(f"  Early stop at epoch {epoch}")
             break
 
     return best_hit, best_state, val_mask, best_preds
 
 
-def train(seed: int = SEED):
+def train(seed: int = SEED, patience: int = PATIENCE):
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}")
+    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}  |  Patience: {patience}")
 
     # Each seed gets its own subdirectory so multi-seed runs don't overwrite each other.
     out_dir = OUTPUT_DIR / f"seed{seed}"
@@ -193,7 +194,7 @@ def train(seed: int = SEED):
 
     for fold in range(N_FOLDS):
         print(f"\n=== Fold {fold + 1}/{N_FOLDS} ===")
-        hit, state, val_mask, val_preds = train_fold(fold, ids, coords, labels, device)
+        hit, state, val_mask, val_preds = train_fold(fold, ids, coords, labels, device, patience=patience)
         fold_results.append(hit)
         all_states.append(state)
         oof_preds[val_mask] = val_preds
@@ -226,6 +227,9 @@ def train(seed: int = SEED):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=SEED,
-                        help="Random seed (default: config.SEED). Use different seeds for ensemble.")
+                        help="Random seed (default: config.SEED=42). Use different seeds for ensemble.")
+    parser.add_argument("--patience", type=int, default=PATIENCE,
+                        help=f"Early stopping patience (default: {PATIENCE}). "
+                             "Phase 5 baseline: seed42→40, seed777→80")
     args = parser.parse_args()
-    train(seed=args.seed)
+    train(seed=args.seed, patience=args.patience)
