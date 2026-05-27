@@ -66,8 +66,15 @@ FOCAL_LML_MODE   = "oracle_rank"   # "oracle_rank" | "margin"
 # 'none': 기존 동작 (default)
 # 'clip': cand_feat = clip(cand_feat, -V, +V)
 # 'tanh': cand_feat = tanh(cand_feat / V)
-CAND_FEAT_NORM_MODE  = "none"    # "none" | "clip" | "tanh"
+CAND_FEAT_NORM_MODE  = "clip"    # "none" | "clip" | "tanh"
 CAND_FEAT_CLIP_VALUE = 2.5       # clip/tanh scale 값
+
+# Experiment A: cand_feat physics interaction (Step A)
+# "이 후보의 물리 가정이 실제 관측과 얼마나 맞는가"를 명시적 피처로 제공
+# 추가 피처 4개: obs_acc_perp, par_match, perp_match, jerk_match → CAND_DIM 10→14
+# False: 기존 CAND_DIM=10 (default, 저장된 모델 호환)
+# True:  CAND_DIM=14 (실험 A 학습 시)
+CAND_FEAT_INTERACTION = False
 
 # Metric
 R_HIT_THRESHOLD = 0.01

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as _F
-from config import EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE
+from config import EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE, CAND_FEAT_INTERACTION
 
 
 @dataclass(frozen=True)
@@ -218,7 +218,7 @@ def make_seq_features(x: np.ndarray) -> np.ndarray:
 
 
 def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
-    """x: (N,11,3), cands: (N,C,3) → (N,C,10)"""
+    """x: (N,11,3), cands: (N,C,3) → (N,C,10) or (N,C,14) if CAND_FEAT_INTERACTION"""
     p0, d1, d2, acc, jerk = motion_terms(x, end_idx=10)
     speed   = np.linalg.norm(d1, axis=1, keepdims=True) + EPS
     tangent = d1 / speed
@@ -231,18 +231,41 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
     cand_perp = dist - np.abs(cand_par)
     speed_h = speed[:, 0] * horizon
 
+    par_a  = np.array([s.par        for s in CANDIDATES])
+    pe_a   = np.array([s.perp       for s in CANDIDATES])
+    jk_a   = np.array([s.jerk       for s in CANDIDATES])
+
     feats = np.stack([
         cand_par  / (speed_h[:, np.newaxis] + EPS),
         cand_perp / (speed_h[:, np.newaxis] + EPS),
         dist      / (speed_h[:, np.newaxis] + EPS),
         np.array([s.d1        for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
-        np.array([s.par       for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
-        np.array([s.perp      for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
+        par_a[np.newaxis, :].repeat(len(x), axis=0),
+        pe_a [np.newaxis, :].repeat(len(x), axis=0),
         np.array([s.d2        for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
-        np.array([s.jerk      for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
+        jk_a [np.newaxis, :].repeat(len(x), axis=0),
         np.array([s.time_scale for s in CANDIDATES])[np.newaxis, :].repeat(len(x), axis=0),
         (acc_par[:, 0, np.newaxis] / (speed[:, 0, np.newaxis] + EPS)).repeat(N_CANDIDATES, axis=1),
-    ], axis=2).astype(np.float32)
+    ], axis=2).astype(np.float32)  # (N, C, 10)
+
+    if CAND_FEAT_INTERACTION:
+        # obs_acc_perp: 법선 가속도 크기 (정규화)
+        acc_perp_v = acc - acc_par * tangent
+        acc_perp_s = np.linalg.norm(acc_perp_v, axis=1, keepdims=True) / (speed + EPS)  # (N,1)
+        # obs_jerk_par: 탄젠트 방향 jerk (정규화)
+        obs_jerk_par = np.sum(jerk * tangent, axis=1, keepdims=True) / (speed + EPS)   # (N,1)
+        # Normalized values expanded to all candidates
+        obs_acc_par_n  = (acc_par[:, 0, np.newaxis] / (speed[:, 0, np.newaxis] + EPS)).repeat(N_CANDIDATES, axis=1)
+        obs_acc_perp_n = acc_perp_s[:, 0, np.newaxis].repeat(N_CANDIDATES, axis=1)
+        obs_jerk_n     = obs_jerk_par[:, 0, np.newaxis].repeat(N_CANDIDATES, axis=1)
+        # Interaction features
+        par_match  = par_a[np.newaxis, :] * obs_acc_par_n   # (N, C)
+        perp_match = pe_a [np.newaxis, :] * obs_acc_perp_n  # (N, C)
+        jerk_match = jk_a [np.newaxis, :] * obs_jerk_n      # (N, C)
+
+        interact = np.stack([obs_acc_perp_n, par_match, perp_match, jerk_match],
+                            axis=2).astype(np.float32)  # (N, C, 4)
+        feats = np.concatenate([feats, interact], axis=2)   # (N, C, 14)
 
     return feats
 
@@ -355,12 +378,13 @@ def make_seq_features_gpu(x: torch.Tensor) -> torch.Tensor:
 
 
 def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:
-    """x: (B,11,3), cands: (B,C,3) → (B,C,10)"""
+    """x: (B,11,3), cands: (B,C,3) → (B,C,10) or (B,C,14) if CAND_FEAT_INTERACTION"""
     p0        = x[:, 10]
     d1        = x[:, 10] - x[:, 9]
+    d2        = x[:, 9]  - x[:, 8]
     speed     = d1.norm(dim=-1, keepdim=True).clamp(min=EPS)
     tangent   = d1 / speed
-    acc       = d1 - (x[:, 9] - x[:, 8])
+    acc       = d1 - d2
     acc_par_s = (acc * tangent).sum(-1, keepdim=True)
 
     delta     = cands - p0[:, None]
@@ -384,6 +408,28 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
         ts_a [None].expand(len(x), -1),
         (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES),
     ], dim=-1)  # (B, C, 10)
+
+    if CAND_FEAT_INTERACTION:
+        # obs_acc_perp: 법선 가속도 크기 (정규화)
+        acc_perp_s = (acc - acc_par_s * tangent).norm(dim=-1, keepdim=True) / (speed + EPS)  # (B, 1)
+        # obs_jerk_par: 탄젠트 방향 jerk 부호값 (정규화)
+        d3        = x[:, 8] - x[:, 7]
+        prev_acc  = d2 - d3
+        jerk_obs  = acc - prev_acc
+        obs_jerk_par = (jerk_obs * tangent).sum(-1, keepdim=True) / (speed + EPS)  # (B, 1)
+        # Normalized observed values → expanded to all candidates
+        obs_acc_par_n  = (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES)  # (B, C)
+        obs_acc_perp_n = acc_perp_s.expand(-1, N_CANDIDATES)                   # (B, C)
+        obs_jerk_n     = obs_jerk_par.expand(-1, N_CANDIDATES)                 # (B, C)
+        # Interaction: candidate param × observed motion stat → per-candidate signal
+        par_match  = par_a[None].expand(len(x), -1) * obs_acc_par_n   # (B, C)
+        perp_match = pe_a [None].expand(len(x), -1) * obs_acc_perp_n  # (B, C)
+        jerk_match = jk_a [None].expand(len(x), -1) * obs_jerk_n      # (B, C)
+
+        interact = torch.stack(
+            [obs_acc_perp_n, par_match, perp_match, jerk_match], dim=-1
+        )  # (B, C, 4)
+        feat = torch.cat([feat, interact], dim=-1)  # (B, C, 14)
 
     # Robust normalization (config.CAND_FEAT_NORM_MODE)
     if CAND_FEAT_NORM_MODE == "clip":

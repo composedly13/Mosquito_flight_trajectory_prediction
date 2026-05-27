@@ -7,14 +7,17 @@ Phase 5 회귀 구조 (commit 66620d4 기준):
 - soft-CE + PW×0.25 + LML×0.10
 - GCN / Aux RegHead 없음 (Phase 8~14 추가분 제거)
 - CAND_DIM=10 (family_id/5 없음 — Phase 8에서 −0.73pp 확인)
+
+Experiment A: CAND_FEAT_INTERACTION=True → CAND_DIM=14
+- +obs_acc_perp, +par_match, +perp_match, +jerk_match
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP
+from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP, CAND_FEAT_INTERACTION
 
 SEQ_DIM  = 11
-CAND_DIM = 10
+CAND_DIM = 10 + (4 if CAND_FEAT_INTERACTION else 0)  # 10 (base) or 14 (with interaction)
 
 
 class PositionalEncoding(nn.Module):
