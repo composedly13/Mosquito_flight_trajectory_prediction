@@ -127,7 +127,7 @@ def predict(
             cands_t    = make_candidates_gpu(c)
             seq_t      = make_seq_features_gpu(c)
             cand_t     = make_cand_features_gpu(c, cands_t)
-            avg_logits = sum(m(seq_t, cand_t, cands_t) for m in selectors) / len(selectors)
+            avg_logits = sum(m(seq_t, cand_t) for m in selectors) / len(selectors)
             pred       = selector_predict(avg_logits, cands_t, topk=TOPK, temp=temp)
 
         all_preds.append(pred.cpu().numpy())

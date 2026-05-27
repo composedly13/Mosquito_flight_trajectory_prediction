@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import hashlib
 
-from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP, B_GROUP_WEIGHT, REG_WEIGHT
+from config import *  # includes TOPK, LISTMLE_WEIGHT, PAIRWISE_WEIGHT, SOFT_TEMP
 from dataset import (
     load_all, MosquitoDataset,
     augment_batch_gpu, augment_batch_gpu_yaw, augment_speed_scale_gpu,
@@ -125,25 +125,12 @@ def train_fold(
             seq_f  = make_seq_features_gpu(coords_b)
             cand_f = make_cand_features_gpu(coords_b, cands)
 
-            logits, rough_delta = model(seq_f, cand_f, cands, return_reg=True)  # (B,C), (B,3)
-            soft = soft_labels(cands, true)                               # (B, C)
+            logits = model(seq_f, cand_f)                               # (B, C)
+            soft   = soft_labels(cands, true)                           # (B, C)
 
-            # Phase 11 Step 2: soft-CE + PW + LML + REG (auxiliary regression)
             loss = soft_ce_loss(logits, soft) + PAIRWISE_WEIGHT * pairwise_loss(logits, soft)
             if LISTMLE_WEIGHT > 0:
                 loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
-            if B_GROUP_WEIGHT > 0:
-                loss = loss + B_GROUP_WEIGHT * oracle_margin_loss(logits, cands, true)
-            if REG_WEIGHT > 0:
-                p0       = coords_b[:, 10]                      # (B, 3) last known position
-                rough_pos = p0 + rough_delta                    # (B, 3) rough prediction
-                # smooth_l1 in threshold-normalized space: error in units of 1cm
-                loss_reg = F.smooth_l1_loss(
-                    rough_pos / R_HIT_THRESHOLD,
-                    true      / R_HIT_THRESHOLD,
-                    beta=1.0,
-                )
-                loss = loss + REG_WEIGHT * loss_reg
 
             optimizer.zero_grad()
             loss.backward()
@@ -163,7 +150,7 @@ def train_fold(
                 seq_f  = make_seq_features_gpu(coords_b)
                 cand_f = make_cand_features_gpu(coords_b, cands)
 
-                logits = model(seq_f, cand_f, cands)
+                logits = model(seq_f, cand_f)
                 pred   = selector_predict(logits, cands, topk=TOPK)
                 preds.append(pred.cpu().numpy())
                 trues.append(batch["label"].cpu().numpy())

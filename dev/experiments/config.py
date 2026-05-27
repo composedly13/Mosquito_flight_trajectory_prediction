@@ -18,66 +18,38 @@ BATCH_SIZE  = 256
 EPOCHS      = 1000
 LR          = 3e-4
 WEIGHT_DECAY = 1e-4
-PATIENCE    = 300       # 증강 환경에서 분산 큼 → 충분한 patience
+PATIENCE    = 300       # seed123 수렴 불안정 대비 충분한 patience
 
 # Augmentation: 'so3' | 'yaw' | 'yaw_speed' | 'none'
-# 'yaw'       : z-axis rotation only (safe for LiDAR z=UP frame)
-# 'yaw_speed' : yaw + speed-scale (scale displacements around last point p0)
-# yaw_speed(0.85~1.15) 실험 결과: OOF -0.24pp (0.6489→0.6465), 효과 없음 → yaw 복귀
+# yaw-only: z=UP 보존, SO3보다 +4.8pp 확인
+# yaw_speed(0.85~1.15): OOF -0.24pp → 효과 없음
 AUG_MODE          = 'yaw'
-SPEED_SCALE_RANGE = (0.85, 1.15)   # Uniform scale range (실험 보존용)
-SPEED_SCALE_PROB  = 0.5            # fraction of samples that get scaled (실험 보존용)
+SPEED_SCALE_RANGE = (0.85, 1.15)
+SPEED_SCALE_PROB  = 0.5
 
-# 추가 증강 (yaw 이후 독립적으로 적용)
-# AUG_FLIP  : y축(left) 반전, prob=0.5 — 좌/우 비행 대칭 (물리적으로 타당)
-#             x축(forward) 반전도 가능하나 센서 시야 방향성 불확실 → y만 적용
-#             z축(up) 반전은 중력 방향 파괴 → 절대 적용 금지
-# AUG_NOISE : 입력 좌표 Gaussian jitter, 라벨은 clean 유지
-#             LiDAR 센서 측정 노이즈(~1mm) 시뮬레이션 → 소폭 perturbation에 강건성
-AUG_FLIP   = True
-AUG_NOISE  = True
-NOISE_STD  = 0.001  # 1mm
+# Phase 14 추가 증강 — Phase 5 회귀로 비활성화
+# AUG_FLIP: seed123 안정성 미검증, Phase 5 baseline에 없음
+# AUG_NOISE: 동일 이유
+AUG_FLIP   = False
+AUG_NOISE  = False
+NOISE_STD  = 0.001  # 1mm (비활성 상태, 실험 보존용)
 
 # Selector Model (Transformer)
-# d256 run result: CV 0.6365 (worse than d128 0.6410) — likely overfitting on 8k samples
-# reverting to d128 with yaw to isolate augmentation effect
+# d256: CV 0.6365 (d128 0.6410보다 나쁨, 10k 샘플 과적합) → d128 유지
 D_MODEL     = 128
 NHEAD       = 4
 NUM_LAYERS  = 3
 DROPOUT     = 0.1
 
-# Boundary MLP — R-Hit@1cm 기준으로 실제 도움이 되는 범위만
-# 0.9cm 미만: 이미 hit, 건드리면 miss로 바뀔 수 있음
-# 1.3cm 초과: 6mm 보정으로 1cm 이하 달성 불가
-BOUNDARY_LO = 0.009    # 0.9cm
-BOUNDARY_HI = 0.013    # 1.3cm
-CORRECTION_CAP = 0.006 # 최대 보정량 6mm
-
 # Loss hyperparameters
-# SOFT_TEMP history: 0.005(default) → 0.003(실험, -0.57pp) → 0.005(복귀)
-SOFT_TEMP       = 0.005   # soft-label temperature
-PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss weight (0.5 시도 → fold5 붕괴, 유지)
-# LISTMLE_WEIGHT grid: 0.0(baseline A) → 0.05(B) → 0.1(C) → 0.2(D)
-LISTMLE_WEIGHT  = 0.05    # 원래 50-cand + LML=0.05 (multi-seed run: 42+123+777)
-# Oracle Margin Loss weight
-# focal(2.0) → oracle rank 악화 (13.3→16.4)
-# oracle_margin(0.10) → OOF -0.85pp, B-group 42.6%→48.9%, rank 16.9 (soft-CE와 gradient 충돌)
-# → 두 방식 모두 실패: loss 충돌 구조 확인
-# 현재: 0.0 (CE+PW+LML 순수 config 복귀)
-B_GROUP_WEIGHT  = 0.0
-
-# Entropy Penalty weight — Phase 9 실험: oracle rank 17.6→24.7 역효과 확인 → 0.0 고정
-ENTROPY_WEIGHT  = 0.0
-
-# Phase 11 Step 2: Auxiliary Regression Head
-# CLS → rough position 예측 → CLS 표현이 "어디로 갈지" 인코딩 강제
-# → cross-attention이 올바른 방향 후보에 집중 → oracle rank 개선
-# loss_reg = smooth_l1( (p0 + rough_Δ) / R_HIT_THRESHOLD, true / R_HIT_THRESHOLD )
-# beta=1.0 (정규화 공간에서 1cm = transition point)
-REG_WEIGHT = 0.5   # soft-CE(~3.0) 대비 reg 기여 ~0.5-2.0 (에러 1-4cm 기준)
+SOFT_TEMP       = 0.005   # soft-label temperature (0.003 시도 → -0.57pp → 복귀)
+PAIRWISE_WEIGHT = 0.25    # pairwise ranking loss (0.5 → fold5 붕괴 확인)
+# LISTMLE grid: 0.0(A) → 0.05(B,+0.23pp) → 0.10(C,rank 10.0) → 0.20(D,불안정)
+# Smart50-cand는 극단 후보 ranking 압력이 더 필요 → 0.10
+LISTMLE_WEIGHT  = 0.10
 
 # Prediction
-TOPK = 10   # train / predict / analyze 통일
+TOPK = 10   # Top-10 weighted average (Top-7~10 최적 확인)
 
 # Metric
 R_HIT_THRESHOLD = 0.01

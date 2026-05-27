@@ -1,12 +1,6 @@
 """
 Transformer-based candidate selector.
 Sequence Transformer → Cross-Attention with candidates → logit per candidate
-
-Phase 5 회귀 구조 (commit 66620d4 기준):
-- Smart 50-cand + LISTMLE_WEIGHT=0.10
-- soft-CE + PW×0.25 + LML×0.10
-- GCN / Aux RegHead 없음 (Phase 8~14 추가분 제거)
-- CAND_DIM=10 (family_id/5 없음 — Phase 8에서 −0.73pp 확인)
 """
 import torch
 import torch.nn as nn
@@ -23,6 +17,7 @@ class PositionalEncoding(nn.Module):
         self.pe = nn.Embedding(max_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, d_model)
         pos = torch.arange(x.size(1), device=x.device)
         return x + self.pe(pos).unsqueeze(0)
 
@@ -57,7 +52,7 @@ class CandidateSelector(nn.Module):
         )
         self.cross_norm = nn.LayerNorm(d_model)
 
-        # Head: [seq_cls || cand_ctx || cand_feat_raw] → 1 logit per candidate
+        # Head: [seq_cls || cand_ctx || cand_feat_proj] → 1 logit per candidate
         self.head = nn.Sequential(
             nn.Linear(d_model * 2 + CAND_DIM, d_model),
             nn.GELU(),
@@ -67,43 +62,54 @@ class CandidateSelector(nn.Module):
 
     def forward(
         self,
-        seq_feat:  torch.Tensor,   # (B, 11, SEQ_DIM)
-        cand_feat: torch.Tensor,   # (B, C, CAND_DIM)
+        seq_feat:  torch.Tensor,   # (B, 11, SEQ_DIM=11)
+        cand_feat: torch.Tensor,   # (B, C, CAND_DIM=10)
     ) -> torch.Tensor:             # (B, C) logits
 
-        # Sequence encoding
-        seq_h = self.seq_proj(seq_feat)   # (B, 11, d)
-        seq_h = self.pos_enc(seq_h)
-        seq_h = self.seq_encoder(seq_h)   # (B, 11, d)
-        cls   = seq_h[:, -1, :]           # (B, d) — last timestep summary
+        B = seq_feat.size(0)
 
-        # Candidate encoding + cross-attention
-        cand_h = self.cand_proj(cand_feat)               # (B, C, d)
-        ctx, _ = self.cross_attn(cand_h, seq_h, seq_h)  # (B, C, d)
+        # Encode sequence
+        seq_h = self.seq_proj(seq_feat)      # (B, 11, d_model)
+        seq_h = self.pos_enc(seq_h)
+        seq_h = self.seq_encoder(seq_h)      # (B, 11, d_model)
+        cls   = seq_h[:, -1, :]              # (B, d_model) — 마지막 시점 summary
+
+        # Encode candidates
+        cand_h = self.cand_proj(cand_feat)   # (B, C, d_model)
+
+        # Cross-attention: each candidate attends to full sequence
+        ctx, _ = self.cross_attn(cand_h, seq_h, seq_h)  # (B, C, d_model)
         ctx    = self.cross_norm(cand_h + ctx)            # residual
 
-        # Scoring head
-        cls_exp = cls.unsqueeze(1).expand(-1, ctx.size(1), -1)   # (B, C, d)
-        h       = torch.cat([cls_exp, ctx, cand_feat], dim=-1)   # (B, C, d*2+CAND_DIM)
-        logits  = self.head(h).squeeze(-1)                        # (B, C)
+        # Head
+        cls_expand = cls.unsqueeze(1).expand(-1, ctx.size(1), -1)  # (B, C, d_model)
+        h = torch.cat([cls_expand, ctx, cand_feat], dim=-1)        # (B, C, d_model*2+CAND_DIM)
+        logits = self.head(h).squeeze(-1)                           # (B, C)
 
         return logits
 
 
 def soft_labels(cands: torch.Tensor, true: torch.Tensor, temp: float = SOFT_TEMP) -> torch.Tensor:
-    dist = torch.norm(cands - true.unsqueeze(1), dim=-1)
+    """
+    Distance-weighted soft targets over candidates.
+    cands: (B, C, 3), true: (B, 3)
+    returns: (B, C) soft label distribution
+    """
+    dist = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
     return F.softmax(-dist / temp, dim=-1)
 
 
 def selector_predict(
-    logits: torch.Tensor,
-    cands:  torch.Tensor,
-    topk:   int   = 3,
-    temp:   float = 1.0,
-) -> torch.Tensor:
+    logits: torch.Tensor,   # (B, C)
+    cands:  torch.Tensor,   # (B, C, 3)
+    topk: int = 3,
+    temp: float = 1.0,
+) -> torch.Tensor:          # (B, 3)
     """Weighted sum of top-k candidates."""
-    weights = F.softmax(logits / temp, dim=-1)
-    topk_w, topk_idx = weights.topk(topk, dim=-1)
+    weights = F.softmax(logits / temp, dim=-1)      # (B, C)
+    topk_w, topk_idx = weights.topk(topk, dim=-1)  # (B, k)
     topk_w = topk_w / topk_w.sum(dim=-1, keepdim=True)
-    topk_cands = cands.gather(1, topk_idx.unsqueeze(-1).expand(-1, -1, 3))
-    return (topk_cands * topk_w.unsqueeze(-1)).sum(dim=1)
+    topk_cands = cands.gather(
+        1, topk_idx.unsqueeze(-1).expand(-1, -1, 3)
+    )  # (B, k, 3)
+    return (topk_cands * topk_w.unsqueeze(-1)).sum(dim=1)  # (B, 3)
