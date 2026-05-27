@@ -15,7 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import torch
-from config import EPS
+import torch.nn.functional as _F
+from config import EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE
 
 
 @dataclass(frozen=True)
@@ -371,7 +372,7 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
     p = _cand_params_gpu(x.device, x.dtype)               # (C, 6)
     d1_a, d2_a, par_a, pe_a, jk_a, ts_a = p.unbind(-1)
 
-    return torch.stack([
+    feat = torch.stack([
         cand_par  / (speed_h[:, None] + EPS),
         cand_perp / (speed_h[:, None] + EPS),
         dist      / (speed_h[:, None] + EPS),
@@ -383,3 +384,12 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
         ts_a [None].expand(len(x), -1),
         (acc_par_s / (speed + EPS)).expand(-1, N_CANDIDATES),
     ], dim=-1)  # (B, C, 10)
+
+    # Robust normalization (config.CAND_FEAT_NORM_MODE)
+    if CAND_FEAT_NORM_MODE == "clip":
+        feat = feat.clamp(-CAND_FEAT_CLIP_VALUE, CAND_FEAT_CLIP_VALUE)
+    elif CAND_FEAT_NORM_MODE == "tanh":
+        feat = torch.tanh(feat / CAND_FEAT_CLIP_VALUE)
+    # "none": no-op
+
+    return feat

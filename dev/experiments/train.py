@@ -47,6 +47,55 @@ def listmle_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor) 
     return -F.log_softmax(logits, dim=-1).gather(1, oracle_idx.unsqueeze(1)).mean()
 
 
+def focal_listmle_loss(
+    logits: torch.Tensor,
+    cands:  torch.Tensor,
+    true:   torch.Tensor,
+    gamma:  float = 1.0,
+    mode:   str   = "oracle_rank",
+) -> torch.Tensor:
+    """
+    Focal ListMLE: oracle 후보가 상위권에 없는 샘플에 더 큰 가중치 부여.
+
+    mode="oracle_rank":
+      - oracle 후보의 현재 rank를 구하고, rank가 높을수록(순위가 낮을수록) 가중치 증가
+      - weight = (oracle_rank / C) ^ gamma
+      - B-group 샘플이 자연히 높은 가중치를 받음
+
+    mode="margin":
+      - oracle logit과 top-1 logit의 gap이 클수록 가중치 증가
+      - weight = sigmoid(gap) ^ gamma
+
+    C-group (oracle dist > 1cm) 샘플은 loss=0 (정답 후보 없음 → 학습 불가)
+    """
+    dist        = torch.norm(cands - true.unsqueeze(1), dim=-1)  # (B, C)
+    oracle_dist = dist.min(dim=-1).values                          # (B,)
+    oracle_idx  = dist.argmin(dim=-1)                              # (B,)
+
+    # oracle log-prob (ListMLE base term)
+    log_probs   = F.log_softmax(logits, dim=-1)                    # (B, C)
+    oracle_logp = log_probs.gather(1, oracle_idx.unsqueeze(1)).squeeze(1)  # (B,)
+
+    if mode == "oracle_rank":
+        # oracle의 현재 rank (0=top1, C-1=last)
+        with torch.no_grad():
+            ranks = (logits > logits.gather(1, oracle_idx.unsqueeze(1))).sum(dim=-1).float()
+        weight = (ranks / logits.size(1)) ** gamma                 # (B,)
+    elif mode == "margin":
+        with torch.no_grad():
+            top1_logit    = logits.max(dim=-1).values
+            oracle_logit  = logits.gather(1, oracle_idx.unsqueeze(1)).squeeze(1)
+            gap = (top1_logit - oracle_logit).clamp(min=0.0)
+        weight = torch.sigmoid(gap) ** gamma                       # (B,)
+    else:
+        raise ValueError(f"Unknown focal mode: {mode}")
+
+    # C-group 마스킹
+    is_ab = (oracle_dist <= R_HIT_THRESHOLD).float()               # (B,)
+    loss  = -(weight * oracle_logp * is_ab)
+    return loss.mean()
+
+
 def oracle_margin_loss(logits: torch.Tensor, cands: torch.Tensor, true: torch.Tensor,
                        k: int = 5, margin: float = 0.15) -> torch.Tensor:
     """
@@ -132,6 +181,12 @@ def train_fold(
             loss = soft_ce_loss(logits, soft) + PAIRWISE_WEIGHT * pairwise_loss(logits, soft)
             if LISTMLE_WEIGHT > 0:
                 loss = loss + LISTMLE_WEIGHT * listmle_loss(logits, cands, true)
+            if FOCAL_LML_WEIGHT > 0:
+                loss = loss + FOCAL_LML_WEIGHT * focal_listmle_loss(
+                    logits, cands, true,
+                    gamma=FOCAL_LML_GAMMA,
+                    mode=FOCAL_LML_MODE,
+                )
 
             optimizer.zero_grad()
             loss.backward()

@@ -51,6 +51,24 @@ LISTMLE_WEIGHT  = 0.10
 # Prediction
 TOPK = 10   # Top-10 weighted average (Top-7~10 최적 확인)
 
+# Focal ListMLE (Step 3: B-group hard sample 강화)
+# oracle 후보가 상위권에 없는 샘플에 더 큰 gradient 압력 부여
+# FOCAL_LML_WEIGHT = 0.0: 비활성 (기존 LML×0.10만 사용)
+# 권장 시작값: 0.05
+# FOCAL_LML_MODE: "oracle_rank" | "margin"
+FOCAL_LML_WEIGHT = 0.0     # 실험 시 0.05부터 시작
+FOCAL_LML_GAMMA  = 1.0     # focal exponent (1.0 / 2.0)
+FOCAL_LML_MODE   = "oracle_rank"   # "oracle_rank" | "margin"
+
+# Candidate feature normalization (Step 2: cand_feat robust clipping)
+# 목적: jerk_xxl/latency_s075/turn_p080 같은 극단 후보 feature scale 안정화
+# → selector가 극단 후보를 이상치로 취급하는 문제 완화
+# 'none': 기존 동작 (default)
+# 'clip': cand_feat = clip(cand_feat, -V, +V)
+# 'tanh': cand_feat = tanh(cand_feat / V)
+CAND_FEAT_NORM_MODE  = "none"    # "none" | "clip" | "tanh"
+CAND_FEAT_CLIP_VALUE = 2.5       # clip/tanh scale 값
+
 # Metric
 R_HIT_THRESHOLD = 0.01
 EPS = 1e-8
