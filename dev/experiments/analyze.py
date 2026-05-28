@@ -112,11 +112,11 @@ def get_oof_logits(models: dict, ids: list, coords: np.ndarray,
     return logits
 
 
-def load_all_models(seeds: list, device: torch.device) -> dict:
+def load_all_models(seeds: list, device: torch.device, out_tag: str = "") -> dict:
     """Load fold models for multiple seeds. Returns {seed: {fold_idx: model}}."""
     all_models = {}
     for seed in seeds:
-        model_dir = OUTPUT_DIR / f"seed{seed}"
+        model_dir = OUTPUT_DIR / f"seed{seed}{out_tag}"
         fold_models = {}
         for fold in range(N_FOLDS):
             path = model_dir / f"selector_fold{fold}.pt"
@@ -127,9 +127,9 @@ def load_all_models(seeds: list, device: torch.device) -> dict:
                 fold_models[fold] = m
         if fold_models:
             all_models[seed] = fold_models
-            print(f"  seed{seed}: {len(fold_models)}/{N_FOLDS} folds 로드")
+            print(f"  seed{seed}{out_tag}: {len(fold_models)}/{N_FOLDS} folds 로드")
         else:
-            print(f"  seed{seed}: 모델 없음 (python train.py --seed {seed} 먼저 실행)")
+            print(f"  seed{seed}{out_tag}: 모델 없음 (python train.py --seed {seed} --out-tag '{out_tag}' 먼저 실행)")
     return all_models
 
 
@@ -164,7 +164,7 @@ def get_oof_preds_multiseed(
                 cands_t    = make_candidates_gpu(c)
                 seq_t      = make_seq_features_gpu(c)
                 cand_t     = make_cand_features_gpu(c, cands_t)
-                avg_logits = sum(m(seq_t, cand_t, cands_t) for m in fold_models) / len(fold_models)
+                avg_logits = sum(m(seq_t, cand_t) for m in fold_models) / len(fold_models)
                 pred       = selector_predict(avg_logits, cands_t, topk=topk, temp=temp)
             preds[val_pos[start:end]] = pred.cpu().numpy()
 
@@ -368,7 +368,7 @@ def oracle_selector_decomposition(
         print("  → A그룹: Top-1 ≈ Top-5 → 가중 평균 영향 미미")
 
 
-def analyze(seeds: list = None):
+def analyze(seeds: list = None, out_tag: str = ""):
     if seeds is None:
         seeds = [SEED]
     seed = seeds[0]  # primary seed for sections 1-6
@@ -388,10 +388,12 @@ def analyze(seeds: list = None):
     print()
     print(f"  TOPK={TOPK}  |  LISTMLE_WEIGHT={LISTMLE_WEIGHT}  |  PAIRWISE_WEIGHT={PAIRWISE_WEIGHT}")
     print(f"  D_MODEL={D_MODEL}  |  NUM_LAYERS={NUM_LAYERS}  |  DROPOUT={DROPOUT}")
+    if out_tag:
+        print(f"  out_tag={out_tag!r}")
     print()
 
     # Load primary seed models for sections 1-6
-    model_dir = OUTPUT_DIR / f"seed{seed}"
+    model_dir = OUTPUT_DIR / f"seed{seed}{out_tag}"
     print(f"모델 디렉토리: {model_dir}  (seed={seed})")
 
     models = {}
@@ -583,6 +585,8 @@ if __name__ == "__main__":
                        help="Single seed to analyze (default: config.SEED)")
     group.add_argument("--seeds", type=int, nargs="+", default=None,
                        help="Multiple seeds for ensemble OOF, e.g. --seeds 42 123 777")
+    parser.add_argument("--out-tag", type=str, default="",
+                        help="Suffix appended to model dir (e.g. '_lml05'). Must match --out-tag used in train.py.")
     args = parser.parse_args()
 
     if args.seeds:
@@ -592,4 +596,4 @@ if __name__ == "__main__":
     else:
         seeds = [SEED]
 
-    analyze(seeds=seeds)
+    analyze(seeds=seeds, out_tag=args.out_tag)

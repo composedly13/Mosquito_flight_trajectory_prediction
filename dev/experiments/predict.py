@@ -39,15 +39,15 @@ from regression import (
 )
 
 
-def load_selectors(seeds: list, device: torch.device) -> list:
+def load_selectors(seeds: list, device: torch.device, out_tag: str = "") -> list:
     """Load all fold models for the given seeds.  seeds=[42] for single-seed inference."""
     models = []
     for seed in seeds:
-        seed_dir = OUTPUT_DIR / f"seed{seed}"
+        seed_dir = OUTPUT_DIR / f"seed{seed}{out_tag}"
         for fold in range(N_FOLDS):
             path = seed_dir / f"selector_fold{fold}.pt"
             if not path.exists():
-                raise FileNotFoundError(f"Missing: {path}  (run: python train.py --seed {seed})")
+                raise FileNotFoundError(f"Missing: {path}  (run: python train.py --seed {seed} --out-tag '{out_tag}')")
             m = CandidateSelector().to(device)
             m.load_state_dict(torch.load(path, map_location=device), strict=False)
             m.eval()
@@ -63,6 +63,8 @@ def predict(
     temp: float = 2.0,
     use_reg2: bool = False,
     use_lstm: bool = False,
+    out_tag: str = "",
+    out_name: str = "",
 ):
     if seeds is None:
         seeds = [SEED]
@@ -70,7 +72,7 @@ def predict(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}  |  Seeds: {seeds}")
 
-    selectors = load_selectors(seeds, device)
+    selectors = load_selectors(seeds, device, out_tag=out_tag)
 
     # LSTM 모델 로드 (--lstm 플래그)
     lstm_models = []
@@ -151,7 +153,8 @@ def predict(
     print("\n[제출 파일 생성]")
 
     # 1. Selector-only
-    save_csv(all_preds, "submission.csv")
+    csv_name = out_name if out_name else "submission.csv"
+    save_csv(all_preds, csv_name)
 
     # 2. Physics-routed LSTM blend
     if lstm_models:
@@ -188,6 +191,10 @@ if __name__ == "__main__":
                         help="Use TransformerRegressor (reg2) for entropy-blend instead of RegMLP")
     parser.add_argument("--lstm", action="store_true",
                         help="Physics-routed LSTM blend (train_lstm.py 학습 후 사용)")
+    parser.add_argument("--out-tag", type=str, default="",
+                        help="Suffix appended to model dir (e.g. '_lml05'). Must match --out-tag used in train.py.")
+    parser.add_argument("--out-name", type=str, default="",
+                        help="Output CSV filename (default: submission.csv). Use to avoid overwriting current best.")
     args = parser.parse_args()
 
     if args.seeds:
@@ -197,4 +204,5 @@ if __name__ == "__main__":
     else:
         seeds = [SEED]
 
-    predict(seeds=seeds, beta=args.beta, temp=args.temp, use_reg2=args.reg2, use_lstm=args.lstm)
+    predict(seeds=seeds, beta=args.beta, temp=args.temp, use_reg2=args.reg2,
+            use_lstm=args.lstm, out_tag=args.out_tag, out_name=args.out_name)

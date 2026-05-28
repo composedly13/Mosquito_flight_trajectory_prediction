@@ -1,0 +1,43 @@
+# Phase 15 LB 0.6776 신기록 — 실행 명령어 기록
+# 날짜: 2026-05-28
+# 제출 파일: submission_phase15_42_777_temp2_top10.csv
+
+# ── 설정 (config.py 기준) ────────────────────────────────────────────────────
+# CAND_FEAT_INTERACTION = True   (CAND_DIM 10 → 14)
+# CAND_FEAT_NORM_MODE   = "none"  (no-clip)
+# FOCAL_LML_WEIGHT      = 0.0
+# LISTMLE_WEIGHT        = 0.10
+# PATIENCE              = 300
+# AUG_MODE              = "yaw"
+# D_MODEL=128, NHEAD=4, NUM_LAYERS=3, DROPOUT=0.1
+# N_CANDIDATES=50 (Smart50)
+# SOFT_TEMP=0.005, PAIRWISE_WEIGHT=0.25
+
+# ── 학습 명령어 ────────────────────────────────────────────────────────────────
+# (작업 디렉토리: D:\Mosquito)
+# conda activate mosquito
+
+python dev/experiments/train.py --seed 42
+# → seed42 OOF: 0.6504  B-group: 44.3%  Oracle rank mean: 14.2
+# → 저장: dev/experiments/outputs/seed42/selector_fold*.pt
+
+python dev/experiments/train.py --seed 777
+# → seed777 OOF: 0.6501  B-group: 44.2%  Oracle rank mean: 13.5
+# → 저장: dev/experiments/outputs/seed777/selector_fold*.pt
+
+# ── 분석 ──────────────────────────────────────────────────────────────────────
+python dev/experiments/analyze.py --seed 42
+python dev/experiments/analyze.py --seed 777
+
+# ── 예측 / 제출 파일 생성 ───────────────────────────────────────────────────
+python dev/experiments/predict_grid.py --seeds 42 777 --weights 0.5 0.5 --temp 2.0 --topk 10
+# 또는 (동일 결과):
+python dev/experiments/predict.py --seeds 42 777
+
+# → 제출 후 LB: 0.6776  (2026-05-28)
+# → 이전 best: 0.6732 (Phase 5 재확립)
+# → 개선: +0.0044
+
+# ── 제출 파일명 ───────────────────────────────────────────────────────────────
+# 원본: dev/experiments/outputs/submission.csv  (2026-05-28 11:29 기준)
+# 백업: archive/best_06776/submission_phase15_42_777_temp2_top10.csv

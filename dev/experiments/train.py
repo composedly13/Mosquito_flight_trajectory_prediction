@@ -232,14 +232,17 @@ def train_fold(
     return best_hit, best_state, val_mask, best_preds
 
 
-def train(seed: int = SEED, patience: int = PATIENCE):
+def train(seed: int = SEED, patience: int = PATIENCE, listmle_weight: float = LISTMLE_WEIGHT, out_tag: str = ""):
+    global LISTMLE_WEIGHT
+    LISTMLE_WEIGHT = listmle_weight  # allow CLI override
+
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}  |  Patience: {patience}")
+    print(f"Device: {device}  |  Candidates: {N_CANDIDATES}  |  Seed: {seed}  |  Aug: {AUG_MODE}  |  Patience: {patience}  |  LML={listmle_weight}")
 
     # Each seed gets its own subdirectory so multi-seed runs don't overwrite each other.
-    out_dir = OUTPUT_DIR / f"seed{seed}"
+    out_dir = OUTPUT_DIR / f"seed{seed}{out_tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
     ids, coords, labels = load_all(TRAIN_DIR, LABELS_PATH)
 
@@ -286,5 +289,11 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=PATIENCE,
                         help=f"Early stopping patience (default: {PATIENCE}). "
                              "Phase 5 baseline: seed42→40, seed777→80")
+    parser.add_argument("--listmle-weight", type=float, default=LISTMLE_WEIGHT,
+                        help=f"ListMLE loss weight (default: {LISTMLE_WEIGHT}). Override for Track A-2.")
+    parser.add_argument("--out-tag", type=str, default="",
+                        help="Suffix appended to output dir (e.g. '_lml05' → seed42_lml05/). "
+                             "Use for Track A-2 to avoid overwriting current best.")
     args = parser.parse_args()
-    train(seed=args.seed, patience=args.patience)
+    train(seed=args.seed, patience=args.patience,
+          listmle_weight=args.listmle_weight, out_tag=args.out_tag)
