@@ -16,7 +16,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as _F
-from config import EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE, CAND_FEAT_INTERACTION
+from config import (EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE,
+                    CAND_FEAT_INTERACTION, CAND_FEAT_SIGN,
+                    C_GATE_V1_ENABLED, C_GATE_JERK_THRESH, C_GATE_TURN_THRESH)
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,26 @@ CANDIDATES = [
     CandidateSpec("turn_fast_n030",    2.08,  0.80, -0.30),
 ]
 
-N_CANDIDATES = len(CANDIDATES)
+N_CANDIDATES_BASE = len(CANDIDATES)  # 50 — always Smart50
+
+# ── Stage 2-B: Extra C-candidates (gated by physics) ─────────────────────────
+# 활성화: config.C_GATE_V1_ENABLED = True
+# turn_p090/n090  : obs_acc_perp >= C_GATE_TURN_THRESH (q95)
+# jerk_extreme_*  : obs_jerk_abs  >= C_GATE_JERK_THRESH (q95)
+# latency_s070/l125: JT (either condition above)
+_EXTRA_CANDIDATES_V1 = [
+    CandidateSpec("turn_p090",        1.72,  0.30,  0.90),            # sharp left turn
+    CandidateSpec("turn_n090",        1.72,  0.30, -0.90),            # sharp right turn
+    CandidateSpec("jerk_extreme_pos", 1.90,  0.70,  0.00, jerk= 1.20),# extreme positive jerk
+    CandidateSpec("jerk_extreme_neg", 1.90,  0.70,  0.00, jerk=-1.20),# extreme negative jerk
+    CandidateSpec("latency_s070",     1.98,  0.96, -0.08, time_scale=0.70),  # very slow timing
+    CandidateSpec("latency_l125",     1.98,  0.96, -0.08, time_scale=1.25),  # very fast timing
+]
+N_EXTRA_V1 = len(_EXTRA_CANDIDATES_V1)
+
+# Effective candidate list — extended when gate enabled
+CANDIDATES    = CANDIDATES + (_EXTRA_CANDIDATES_V1 if C_GATE_V1_ENABLED else [])
+N_CANDIDATES  = len(CANDIDATES)
 
 FAMILY_NAMES = ["base", "acc", "frenet", "turn", "jerk", "latency"]
 
@@ -267,6 +288,27 @@ def make_cand_features(x: np.ndarray, cands: np.ndarray) -> np.ndarray:
                             axis=2).astype(np.float32)  # (N, C, 4)
         feats = np.concatenate([feats, interact], axis=2)   # (N, C, 14)
 
+    if CAND_FEAT_SIGN:
+        # Sign-aware features (Stage 2-A): CAND_DIM 14→16
+        # Requires CAND_FEAT_INTERACTION=True (acc_perp_v, obs_jerk_par already computed)
+        # 1. jerk_sign_match = sign(cand_jerk) × sign(obs_jerk_par) ∈ {-1,0,+1}
+        obs_jk_par_1d = np.sum(jerk * tangent, axis=1) / (speed[:, 0] + EPS)  # (N,)
+        jk_sign_mat   = np.sign(jk_a)[np.newaxis, :] * np.sign(obs_jk_par_1d)[:, np.newaxis]  # (N,C)
+
+        # 2. perp_sign_match = sign(cand_perp) × sign(obs_jerk_perp projected onto acc_perp dir)
+        #    obs_jk_perp_signed: tells which way the turn is about to change
+        if not CAND_FEAT_INTERACTION:
+            acc_perp_v = acc - acc_par * tangent  # fallback if not already computed
+        acc_perp_mag = np.linalg.norm(acc_perp_v, axis=1, keepdims=True).clip(EPS)
+        acc_perp_unit = acc_perp_v / acc_perp_mag                               # (N,3)
+        jk_par_s      = np.sum(jerk * tangent, axis=1, keepdims=True)           # (N,1) scalar
+        jk_perp_v     = jerk - jk_par_s * tangent                               # (N,3)
+        obs_jk_perp_signed = np.sum(jk_perp_v * acc_perp_unit, axis=1)         # (N,) signed
+        pe_sign_mat   = np.sign(pe_a)[np.newaxis, :] * np.sign(obs_jk_perp_signed)[:, np.newaxis]  # (N,C)
+
+        sign_feats = np.stack([jk_sign_mat, pe_sign_mat], axis=2).astype(np.float32)  # (N,C,2)
+        feats = np.concatenate([feats, sign_feats], axis=2)  # (N, C, 16)
+
     return feats
 
 
@@ -431,6 +473,29 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
         )  # (B, C, 4)
         feat = torch.cat([feat, interact], dim=-1)  # (B, C, 14)
 
+    if CAND_FEAT_SIGN:
+        # Sign-aware features (Stage 2-A): CAND_DIM 14→16
+        # Requires CAND_FEAT_INTERACTION (jerk_obs, acc_perp_s already computed above)
+        # 1. jerk_sign_match = sign(cand_jerk) × sign(obs_jerk_par) ∈ {-1,0,+1}
+        obs_jk_par_1d = (jerk_obs * tangent).sum(-1) / (speed[:, 0] + EPS)  # (B,) signed
+        jk_sign_c   = torch.sign(jk_a[None].expand(len(x), -1))             # (B, C)
+        obs_jk_sign = torch.sign(obs_jk_par_1d[:, None].expand(-1, N_CANDIDATES))  # (B, C)
+        jk_sign_mat = jk_sign_c * obs_jk_sign                               # (B, C)
+
+        # 2. perp_sign_match = sign(cand_perp) × sign(obs_jerk_perp projected onto acc_perp dir)
+        acc_perp_v  = acc - acc_par_s * tangent                             # (B, 3)
+        acc_perp_m  = acc_perp_v.norm(dim=-1, keepdim=True).clamp(EPS)
+        acc_perp_unit = acc_perp_v / acc_perp_m                            # (B, 3)
+        jk_par_s_v  = (jerk_obs * tangent).sum(-1, keepdim=True)           # (B, 1)
+        jk_perp_v   = jerk_obs - jk_par_s_v * tangent                     # (B, 3)
+        obs_jk_perp = (jk_perp_v * acc_perp_unit).sum(-1)                 # (B,) signed
+        pe_sign_c   = torch.sign(pe_a[None].expand(len(x), -1))           # (B, C)
+        obs_pe_sign = torch.sign(obs_jk_perp[:, None].expand(-1, N_CANDIDATES))  # (B, C)
+        pe_sign_mat = pe_sign_c * obs_pe_sign                              # (B, C)
+
+        sign_feat = torch.stack([jk_sign_mat, pe_sign_mat], dim=-1)        # (B, C, 2)
+        feat = torch.cat([feat, sign_feat], dim=-1)                        # (B, C, 16)
+
     # Robust normalization (config.CAND_FEAT_NORM_MODE)
     if CAND_FEAT_NORM_MODE == "clip":
         feat = feat.clamp(-CAND_FEAT_CLIP_VALUE, CAND_FEAT_CLIP_VALUE)
@@ -439,3 +504,81 @@ def make_cand_features_gpu(x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor
     # "none": no-op
 
     return feat
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2-B: Gate mask  (used when C_GATE_V1_ENABLED=True)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _gate_physics_np(x: np.ndarray):
+    """Returns (obs_jerk, obs_perp) normalized by speed, shape (N,)."""
+    p0_, d1_, d2_, acc_, jk_v = motion_terms(x, end_idx=10)
+    sp_   = np.linalg.norm(d1_, axis=1, keepdims=True).clip(EPS)
+    tg_   = d1_ / sp_
+    aps_  = (acc_ * tg_).sum(axis=1, keepdims=True)
+    apv_  = acc_ - aps_ * tg_
+    obs_jerk = np.linalg.norm(jk_v,  axis=1) / (sp_[:, 0] + EPS)
+    obs_perp = np.linalg.norm(apv_,  axis=1) / (sp_[:, 0] + EPS)
+    return obs_jerk, obs_perp
+
+
+def compute_gate_mask_np(x: np.ndarray,
+                          jerk_thresh: float = C_GATE_JERK_THRESH,
+                          turn_thresh: float = C_GATE_TURN_THRESH) -> np.ndarray:
+    """
+    x: (N, 11, 3)
+    Returns: (N, N_CANDIDATES_BASE + N_EXTRA_V1) bool
+    Base 50 candidates: always True.
+    Extra 6 candidates: activated by physics gate (JT_q95).
+    """
+    N = len(x)
+    n_b = N_CANDIDATES_BASE
+    mask = np.ones((N, n_b + N_EXTRA_V1), dtype=bool)
+
+    obs_jerk, obs_perp = _gate_physics_np(x)
+    turn_gate  = obs_perp >= turn_thresh
+    jerk_gate  = obs_jerk >= jerk_thresh
+    jt_gate    = turn_gate | jerk_gate
+
+    # turn_p090 [n_b+0], turn_n090 [n_b+1]
+    mask[:, n_b:n_b+2] = turn_gate[:, None]
+    # jerk_extreme_pos [n_b+2], jerk_extreme_neg [n_b+3]
+    mask[:, n_b+2:n_b+4] = jerk_gate[:, None]
+    # latency_s070 [n_b+4], latency_l125 [n_b+5]
+    mask[:, n_b+4:n_b+6] = jt_gate[:, None]
+    return mask
+
+
+def compute_gate_mask_gpu(x: torch.Tensor,
+                           jerk_thresh: float = C_GATE_JERK_THRESH,
+                           turn_thresh: float = C_GATE_TURN_THRESH) -> torch.Tensor:
+    """
+    x: (B, 11, 3)
+    Returns: (B, N_CANDIDATES_BASE + N_EXTRA_V1) bool
+    """
+    B   = x.shape[0]
+    n_b = N_CANDIDATES_BASE
+    dev = x.device
+
+    p0_ = x[:, 10]; d1_ = x[:, 10] - x[:, 9]; d2_ = x[:, 9] - x[:, 8]
+    acc_    = d1_ - d2_
+    d3_     = x[:, 8] - x[:, 7]
+    prev_ac = d2_ - d3_
+    jk_v    = acc_ - prev_ac                                              # (B, 3)
+    sp_     = d1_.norm(dim=-1, keepdim=True).clamp(EPS)
+    tg_     = d1_ / sp_
+    aps_    = (acc_ * tg_).sum(-1, keepdim=True)
+    apv_    = acc_ - aps_ * tg_
+
+    obs_jerk = jk_v.norm(dim=-1) / (sp_[:, 0] + EPS)   # (B,)
+    obs_perp = apv_.norm(dim=-1) / (sp_[:, 0] + EPS)   # (B,)
+
+    turn_gate = obs_perp >= turn_thresh   # (B,)
+    jerk_gate = obs_jerk >= jerk_thresh
+    jt_gate   = turn_gate | jerk_gate
+
+    mask = torch.ones(B, n_b + N_EXTRA_V1, dtype=torch.bool, device=dev)
+    mask[:, n_b:n_b+2]   = turn_gate.unsqueeze(1)
+    mask[:, n_b+2:n_b+4] = jerk_gate.unsqueeze(1)
+    mask[:, n_b+4:n_b+6] = jt_gate.unsqueeze(1)
+    return mask

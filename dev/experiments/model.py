@@ -14,10 +14,13 @@ Experiment A: CAND_FEAT_INTERACTION=True → CAND_DIM=14
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from config import D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP, CAND_FEAT_INTERACTION
+from config import (D_MODEL, NHEAD, NUM_LAYERS, DROPOUT, SOFT_TEMP,
+                    CAND_FEAT_INTERACTION, CAND_FEAT_SIGN)
 
 SEQ_DIM  = 11
-CAND_DIM = 10 + (4 if CAND_FEAT_INTERACTION else 0)  # 10 (base) or 14 (with interaction)
+CAND_DIM = (10
+            + (4 if CAND_FEAT_INTERACTION else 0)   # 14 when interaction
+            + (2 if CAND_FEAT_SIGN         else 0)) # 16 when sign features
 
 
 class PositionalEncoding(nn.Module):
@@ -37,8 +40,10 @@ class CandidateSelector(nn.Module):
         nhead: int = NHEAD,
         num_layers: int = NUM_LAYERS,
         dropout: float = DROPOUT,
+        cand_dim: int | None = None,   # None → use module-level CAND_DIM
     ):
         super().__init__()
+        _cd = CAND_DIM if cand_dim is None else cand_dim
 
         # Sequence encoder
         self.seq_proj = nn.Linear(SEQ_DIM, d_model)
@@ -52,7 +57,7 @@ class CandidateSelector(nn.Module):
         self.seq_encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
 
         # Candidate encoder
-        self.cand_proj = nn.Linear(CAND_DIM, d_model)
+        self.cand_proj = nn.Linear(_cd, d_model)
 
         # Cross-attention: candidate queries, sequence keys/values
         self.cross_attn = nn.MultiheadAttention(
@@ -62,7 +67,7 @@ class CandidateSelector(nn.Module):
 
         # Head: [seq_cls || cand_ctx || cand_feat_raw] → 1 logit per candidate
         self.head = nn.Sequential(
-            nn.Linear(d_model * 2 + CAND_DIM, d_model),
+            nn.Linear(d_model * 2 + _cd, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, 1),

@@ -76,6 +76,30 @@ CAND_FEAT_CLIP_VALUE = 2.5       # clip/tanh scale 값
 # True:  CAND_DIM=14 (실험 A 학습 시)
 CAND_FEAT_INTERACTION = True
 
+# Stage 2-A: Sign-aware features (Step 2A)
+# jerk_sign_match: sign(cand_jerk) × sign(obs_jerk_par) ∈ {-1,0,+1}
+# perp_sign_match: sign(cand_perp) × sign(obs_jerk_perp_dir) ∈ {-1,0,+1}
+# 추가 피처 2개 → CAND_DIM 14→16
+# False: 기존 CAND_DIM=14 (default, Phase 15 호환)
+# True: CAND_DIM=16 (Stage 2-A sign feature 학습 시)
+CAND_FEAT_SIGN = False
+
+# Stage 2-A: Turn-aware soft label reweight (Step 3)
+# oracle family가 turn인 샘플에서 turn 후보 boost, jerk 후보 decay
+# 1.00 = 비활성 (default, Phase 15 호환)
+TURN_TARGET_BOOST = 1.00   # turn 후보 soft label 증폭 (1.05 / 1.10 / 1.15)
+JERK_TARGET_DECAY = 1.00   # jerk 후보 soft label 감쇠 (0.95 / 0.98 / 1.00)
+
+# Stage 2-B: Gated C-candidates (Method A: mask -inf for inactive extra cands)
+# C_GATE_V1_ENABLED=True → CANDIDATES 50+6=56 (extra 6 gated by physics)
+# False: 기존 Smart50 그대로 (Phase 15 호환)
+C_GATE_V1_ENABLED = False
+
+# Gate thresholds — q95 of obs_jerk_abs / obs_acc_perp_abs on training data
+# JT_q95: act=7.4%, C_prec=0.532, C_rec=0.172
+C_GATE_JERK_THRESH = 1.038493   # obs_jerk_abs >= this → extra jerk/latency cands 활성
+C_GATE_TURN_THRESH = 0.626477   # obs_acc_perp_abs >= this → extra turn/latency cands 활성
+
 # Metric
 R_HIT_THRESHOLD = 0.01
 EPS = 1e-8
