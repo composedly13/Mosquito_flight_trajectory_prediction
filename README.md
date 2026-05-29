@@ -297,7 +297,7 @@ python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_gated_v1 \
 
 ## 현재 파이프라인 (Current Default) — Phase 5 재확립 기준
 
-> **현재 최고 LB: 0.6776** (2026-05-28, 2-seed 42+777, interaction+no-clip)
+> **현재 최고 LB: 0.6826** ✅ (2026-05-29, Stage 2-B gated v1, seed42+777)
 > 이후 모든 실험은 이 baseline과 비교해야 합니다.
 
 | 항목 | 현재 설정 | 비고 |
@@ -315,7 +315,7 @@ python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_gated_v1 \
 | OOF (seed777, Phase 5 재확립) | **0.6479** (std=0.0012) | P=80으로 Fold5 회복, 매우 안정 |
 | Oracle ceiling | **77.02%** (Smart 50-cand) | |
 | Selector efficiency | **84.1%** (2-seed 앙상블 기준) | |
-| **LB (current best)** | **0.6776** ✅ | seed42+seed777, interaction+no-clip, P=300 |
+| **LB (current best)** | **0.6826** ✅ | seed42+seed777, Stage 2-B gated v1, JT_q95, Smart56 |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 | |
 | Patience CLI | `python train.py --patience 80` | seed777 재현 시 필수 |
 
@@ -403,7 +403,7 @@ Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 | Stage 1: inference calibration (dynamic topk/soft bias) | 50★ | — | 77.02% | 84.4% | — | 미제출 — dynamic topk NG, soft bias 앙상블 −0.0002 → 폐기 |
 | **Stage 2-A b120d97** (boost=1.20, decay=0.97, seed42+777) | 50★ | — | 77.02% | 84.5% | 0.6516/0.6522 | **LB 0.6774** (−0.0002 vs best) jerk top1 66.9%→58.4% |
 | **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42) | **56★** | — | **78.26%** | 83.4% | 0.6525 | Oracle +1.24pp, C-group 23.0%→21.7%, gate=False +0.002 |
-| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42+777) | **56★** | — | **78.26%** | 83.4% | 0.6458† | 2-seed OOF −0.31pp vs P15(0.6489) — LB TBD |
+| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42+777) | **56★** | — | **78.26%** | 83.4% | 0.6458† | **LB 0.6826** ✅ 신기록 (+0.005 vs 0.6776) |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -2598,5 +2598,6 @@ LB 제출 파일: `submission_stage2b_gated_v1_42_777.csv`
 
 config 기록: `dev/experiments/outputs/stage2b_gated_v1_config.txt`
 
-판정: 부분 성공 — Oracle/C-group 개선 + gate=False 무손상.
-LB 0.6776 초과 시 → Stage 2-B current candidate 승격, LB 미달 시 → v2 진입 여부 논의
+**LB 0.6826 ✅ 신기록** (+0.005 vs Phase 15 0.6776)
+Stage 2-B gated v1 → current best candidate 승격.
+2-seed OOF(0.6458)가 낮았음에도 LB 대폭 개선 확인 — Oracle +1.24pp / C-group -1.3pp 가 실제 성능으로 직결됨.

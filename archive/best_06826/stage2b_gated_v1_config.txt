@@ -1,0 +1,62 @@
+# Stage 2-B Gated C-candidates v1 — 제출 config 기록
+# 생성: 2026-05-29
+
+## 기본 구조 (Phase 15 유지)
+base_checkpoint: Phase 15 interaction+no-clip
+CAND_DIM: 14 (interaction, no sign feature, no-clip)
+N_CANDIDATES_BASE: 50 (Smart50)
+N_EXTRA: 6
+N_CANDIDATES_TOTAL: 56 (gate 활성 시)
+LISTMLE_WEIGHT: 0.10
+PATIENCE: 300
+AUG_MODE: yaw
+D_MODEL: 128, NHEAD: 4, NUM_LAYERS: 3
+temp: 2.0 (submission), 1.0 (OOF eval)
+topk: 10
+
+## Gate 설정
+gate_type: JT_q95 (obs_jerk >= 1.038493 OR obs_acc_perp >= 0.626477)
+gate_activated_ratio: 7.4% (744/10000 train samples)
+gate_C_precision: 0.532
+gate_C_recall: 0.172
+gate_method: Method A (mask -inf for inactive extra candidates)
+
+## Extra Candidates v1
+turn_p090    : d1=1.72, par=0.30, perp=+0.90
+turn_n090    : d1=1.72, par=0.30, perp=-0.90
+jerk_extreme_pos: d1=1.90, par=0.70, perp=0.00, jerk=+1.20
+jerk_extreme_neg: d1=1.90, par=0.70, perp=0.00, jerk=-1.20
+latency_s070 : d1=1.98, par=0.96, perp=-0.08, time_scale=0.70
+latency_l125 : d1=1.98, par=0.96, perp=-0.08, time_scale=1.25
+
+## 학습된 checkpoint
+seed42: dev/experiments/outputs/seed42_stage2b_gated_v1/selector_fold{0-4}.pt
+seed777: dev/experiments/outputs/seed777_stage2b_gated_v1/selector_fold{0-4}.pt
+
+## OOF 결과 (gate=True threshold로 분할)
+seed42 OOF overall:    0.6525  (Phase 15: 0.6504, +0.0021)
+seed42 OOF gate=True:  0.3024  (Phase 15: 0.2997, +0.0027)
+seed42 OOF gate=False: 0.6806  (Phase 15: 0.6786, +0.0020) ← 손상 없음
+seed777 OOF overall:   0.6526  (Phase 15: 0.6501, +0.0025)
+seed777 OOF gate=True: 0.2984
+seed777 OOF gate=False:0.6811  (Phase 15: ~0.679, +0.0021)
+2-seed ensemble OOF:   0.6458  (Phase 15: 0.6489, -0.0031)
+
+## Oracle / C-group
+Oracle (56 cands): 78.26%  (Phase 15: 77.02%, +1.24pp)
+C-group: 21.7%             (Phase 15: 23.0%, -1.3pp)
+Efficiency: 83.4%          (Phase 15: 84.4%, -1.0pp)
+
+## 제출 파일
+submission_stage2b_gated_v1_42_777.csv
+생성 명령:
+python dev/experiments/predict.py --seeds 42 777 \
+  --out-tag _stage2b_gated_v1 \
+  --gate-v1 \
+  --out-name submission_stage2b_gated_v1_42_777.csv
+
+## 판정
+부분 성공 — Oracle/C-group 개선 확인, gate=False 손상 없음
+multi-seed ensemble OOF baseline 대비 -0.31pp (리스크 있음)
+LB 제출 후 0.6776 초과 시 → Stage 2-B current candidate 승격
+LB 0.6776 이하 시 → 실험 기록 보존, v2 진입 여부 논의
