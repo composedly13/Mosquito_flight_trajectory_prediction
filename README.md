@@ -297,7 +297,7 @@ python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_gated_v1 \
 
 ## 현재 파이프라인 (Current Default) — Phase 5 재확립 기준
 
-> **현재 최고 LB: 0.6826** ✅ (2026-05-29, Stage 2-B gated v1, seed42+777)
+> **현재 최고 LB: 0.6864** ✅ (2026-05-29, Stage 2-B v2-jerk, seed42+777)
 > 이후 모든 실험은 이 baseline과 비교해야 합니다.
 
 | 항목 | 현재 설정 | 비고 |
@@ -315,7 +315,7 @@ python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_gated_v1 \
 | OOF (seed777, Phase 5 재확립) | **0.6479** (std=0.0012) | P=80으로 Fold5 회복, 매우 안정 |
 | Oracle ceiling | **77.02%** (Smart 50-cand) | |
 | Selector efficiency | **84.1%** (2-seed 앙상블 기준) | |
-| **LB (current best)** | **0.6826** ✅ | seed42+seed777, Stage 2-B gated v1, JT_q95, Smart56 |
+| **LB (current best)** | **0.6864** ✅ | seed42+seed777, Stage 2-B v2-jerk, JT_q95, Smart58 (+jerk_extreme±1.80) |
 | Multi-seed | train/analyze/predict 모두 `--seed` / `--seeds` CLI 지원 | |
 | Patience CLI | `python train.py --patience 80` | seed777 재현 시 필수 |
 
@@ -403,7 +403,10 @@ Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 | Stage 1: inference calibration (dynamic topk/soft bias) | 50★ | — | 77.02% | 84.4% | — | 미제출 — dynamic topk NG, soft bias 앙상블 −0.0002 → 폐기 |
 | **Stage 2-A b120d97** (boost=1.20, decay=0.97, seed42+777) | 50★ | — | 77.02% | 84.5% | 0.6516/0.6522 | **LB 0.6774** (−0.0002 vs best) jerk top1 66.9%→58.4% |
 | **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42) | **56★** | — | **78.26%** | 83.4% | 0.6525 | Oracle +1.24pp, C-group 23.0%→21.7%, gate=False +0.002 |
-| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42+777) | **56★** | — | **78.26%** | 83.4% | 0.6458† | **LB 0.6826** ✅ 신기록 (+0.005 vs 0.6776) |
+| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42+777) | **56★** | — | **78.26%** | 83.4% | 0.6458† | **LB 0.6826** ✅ |
+| Stage 1 q94 threshold inference (act=8.8%) | 56★ | — | 78.26% | 83.4% | — | **LB 0.6816** ❌ gate 확대 역효과 |
+| **Stage 2-B v2-jerk** (Smart58 +jerk±1.80, 42+777) | **58★** | — | **78.88%** | 82.7% | 0.6429 | **LB 0.6864** ✅ 신기록 (+0.0038) |
+| Stage 2-B v3-A jerk+turn (seed42 only) | 60★ | — | **79.12%** | 82.4% | — | seed777 학습 중, LB TBD |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
@@ -430,6 +433,7 @@ Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 | **Phase 11 Step 2: soft-CE + reg_head (CAND_DIM=10)** | **15.8** | 39.1% | 27.5% | 48.0% | 24.6% | oracle rank Phase 7(13.3) 대비 소폭 악화, OOF +0.27pp — reg_head 효과 제한적 |
 | **Phase 15 (Smart50+interaction, seed42)** | **14.2** | 43.9% | 32.8% | 44.3% | 23.0% | LB 0.6776 ✅ current best — jerk top1=66.9%, turn_oracle_rank=20.9 |
 | Stage 2-A b120d97 (turn_boost=1.20, jerk_decay=0.97) | **14.2** | 43.6% | 32.5% | 44.5% | 23.0% | jerk top1=58.4% (−8.5pp), turn_or+jerk_t1=25.6% (−6.3pp), B_top10_RHit 0.8245→0.8287 |
+| **Stage 2-B v2-jerk** (Smart58, JT_q95, seed42) | 27.2* | — | 22.1%* | 56.1%* | 21.1% | Oracle 78.88%, gate_F=0.6820, LB 0.6864 ✅ |
 | **Stage 2-B gated v1** (Smart56, JT_q95 gate) | 27.2* | 43.6% | 22.1%* | 56.1%* | 21.7% | *A/B 왜곡: gate=False extra cand oracle이 rank≥50→B-group 강제편입. OOF 기준 판단 |
 
 ---
@@ -2601,3 +2605,89 @@ config 기록: `dev/experiments/outputs/stage2b_gated_v1_config.txt`
 **LB 0.6826 ✅ 신기록** (+0.005 vs Phase 15 0.6776)
 Stage 2-B gated v1 → current best candidate 승격.
 2-seed OOF(0.6458)가 낮았음에도 LB 대폭 개선 확인 — Oracle +1.24pp / C-group -1.3pp 가 실제 성능으로 직결됨.
+
+---
+
+**[2026-05-29 Stage 2-B Ablation / v2 / v3 실험 기록]**
+
+**Gate threshold ablation (inference-only, 기존 v1 체크포인트 사용)**
+
+- q94 (jerk=0.929, turn=0.566, act=8.8%): LB 0.6816 → **q95보다 -0.001 하락** → gate 확대가 test A/B 오염 일으킴. 폐기.
+- q96 (jerk=1.167, turn=0.701, act=6.1%): gate_F OOF 손상(0.6775 < 0.6786) → 미제출.
+- **q95 = current threshold** (LB 0.6826 기준).
+- train-time에는 gate threshold가 반영되지 않음(freeze bug). threshold 변경은 inference-only에서만 의미.
+
+버그 내역: `compute_gate_mask_np/gpu` default parameter가 import 시 freeze → 수정(동적 읽기).
+
+**Stage 2-A retrain 무효 처리**: q94/q96 재학습 시도했으나 동일한 freeze 버그로 q95와 동일한 모델 학습됨. `archive/invalid_q94_q96_as_q95/` 에 기록.
+
+---
+
+**Stage 2-B v2 실험 (seed42 단독)**
+
+| setting | OOF | Oracle | C-group | Efficiency | gate_F OOF |
+|---|---:|---:|---:|---:|---:|
+| v1 (LB 0.6826) | 0.6525 | 78.26% | 21.7% | 83.4% | 0.6806 |
+| v2-A turn (+turn_p110/n110) | 0.6513 | 78.52% | 21.5% | 82.9% | 0.6804 |
+| **v2-B jerk (+jerk_±1.80)** | **0.6524** | **78.88%** | **21.1%** | **82.7%** | **0.6820** |
+| v2-C latency (+s065/l130) | 0.6479 | 78.42% | 21.6% | 82.6% | 0.6783 |
+
+v2-B jerk 선정: Oracle +0.62pp, gate_F +0.0014. seed777 확장 후 제출.
+
+**LB 0.6864 ✅ 신기록** (v2-B jerk, 2026-05-29 12:55)
+- Oracle: 78.88%, C-group: 21.1%
+- seed42 OOF: 0.6524, seed777 OOF: 0.6522
+- gate_F: 0.6820 (Phase 15 대비 +0.0034)
+- `archive/best_06864/` 백업 완료
+
+Extra candidates v2-B (v1 extra 6개 + 2개 = 58 total):
+- jerk_extreme_pos180: d1=1.84, par=0.61, jerk=+1.80
+- jerk_extreme_neg180: d1=1.84, par=0.61, jerk=-1.80
+
+---
+
+**Stage 2-B v3 실험 (seed42 단독)**
+
+| setting | OOF | Oracle | C-group | Efficiency | gate_F OOF |
+|---|---:|---:|---:|---:|---:|
+| v2-jerk (LB 0.6864) | 0.6524 | 78.88% | 21.1% | 82.7% | 0.6820 |
+| v3-A jerk+turn (+turn_p110/n110) | 0.6522 | **79.12%** | **20.9%** | 82.4% | 0.6814 |
+| v3-B jerk+latency (+s065/l130) | 0.6524 | 79.03% | 21.0% | 82.6% | 0.6813 |
+
+v3 성공 기준(OOF≥0.6550, Oracle≥79.5%, C≤20%) 미달.
+gate_F는 소폭 v2-jerk보다 낮아졌으나 Phase 15(0.6786) 대비 개선.
+v3-A 제출 후 LB 확인 예정(Oracle +0.24pp, C-group -0.2pp 근거).
+
+추가 후보 (v3 60개 total):
+- v3-A (60 cands): v1(6) + jerk±1.80(2) + turn_p110/n110(2)
+- v3-B (60 cands): v1(6) + jerk±1.80(2) + latency_s065/l130(2)
+
+---
+
+**[2026-05-29 Stage 2-B 추가 ablation (기준: v2-jerk LB 0.6864)]**
+
+5개 후보 단독(seed42) 스크리닝 — 통과 기준: OOF≥기준, gate_F 무손상.
+
+| 실험 | OOF | Oracle | C-group | Eff | gate_T | gate_F | 판정 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| v2-jerk (기준) | 0.6524 | 78.88% | 21.1% | 82.7% | 0.2836 | 0.6820 | LB 0.6864 |
+| **jerk200** | **0.6537** | 78.95% | 21.1% | 82.8% | **0.2997** | 0.6822 | ✓ 통과 |
+| **latfast** | **0.6537** | 78.88% | 21.1% | 82.9% | 0.2890 | **0.6830** | ✓ 통과 |
+| latslow | 0.6519 | 79.03% | 21.0% | 82.5% | 0.2755 | 0.6822 | = 보류 |
+| turnp | 0.6495 | 79.04% | 21.0% | 82.2% | 0.2984 | 0.6777 | ✗ gate_F 손상 |
+| turnn | 0.6485 | 78.96% | 21.0% | 82.1% | 0.2876 | 0.6775 | ✗ gate_F 손상 |
+
+jerk200 / latfast 둘 다 통과 — seed42 OOF +0.0013, gate_F 개선. turn 계열은 gate_F 손상으로 폐기.
+
+**seed777 확장 검증 (gate_F 무손상 확인):**
+
+| 후보 | seed42 OOF | seed777 OOF | gate_F (s777) | 결과 |
+|---|---:|---:|---:|---|
+| jerk200 | 0.6537 | 0.6508 | 0.6796 | ✓ |
+| latfast | 0.6537 | 0.6505 | 0.6795 | ✓ |
+
+둘 다 gate_F 손상 없음 → 제출 파일 생성 완료 (seed42+777):
+- `outputs/submission_stage2b_v2_jerk200_42_777.csv` (10000 rows) — `--gate-v1 --v2-jerk200`
+- `outputs/submission_stage2b_v3_jt_latfast_42_777.csv` (10000 rows) — `--gate-v1 --v2-jerk --v2-lat-fast`
+
+제출 순서 추천: **jerk200 먼저** (gate_T OOF 더 높음 0.2997 vs 0.2890, jerk 성공 라인 유지) → **latfast** (gate_F 최고 0.6830). 둘 다 v2-jerk(LB 0.6864) 대비 seed42 OOF +0.0013. LB 결과 TBD.

@@ -90,18 +90,11 @@ CAND_FEAT_SIGN = False
 TURN_TARGET_BOOST = 1.00   # turn 후보 soft label 증폭 (1.05 / 1.10 / 1.15)
 JERK_TARGET_DECAY = 1.00   # jerk 후보 soft label 감쇠 (0.95 / 0.98 / 1.00)
 
-# Stage 2-B v2: Additional extra candidates (additive)
-C_GATE_V2_TURN    = False   # add turn_p110/n110    (+2)
-C_GATE_V2_JERK    = False   # add jerk_extreme±1.80 (+2)
-C_GATE_V2_LATENCY = False   # add latency_s065/l130 (+2)
-# Jerk strength ablation
-C_GATE_V2_JERK_200 = False  # add jerk_extreme±2.00 (+2, replaces JERK)
-C_GATE_V2_JERK_220 = False  # add jerk_extreme±2.20 (+2, last attack)
-# One-sided variants (each adds 1 candidate)
-C_GATE_V2_TURN_P  = False   # add turn_p110 only (+1)
-C_GATE_V2_TURN_N  = False   # add turn_n110 only (+1)
-C_GATE_V2_LAT_SLOW = False  # add latency_s065 only (+1)
-C_GATE_V2_LAT_FAST = False  # add latency_l130 only (+1)
+# Stage 2-B v2: Additional extra candidates (one set at a time)
+# Only one of these should be True at a time.
+C_GATE_V2_TURN    = False   # add turn_p110/n110    (58 total cands)
+C_GATE_V2_JERK    = False   # add jerk_extreme±1.80 (58 total cands)
+C_GATE_V2_LATENCY = False   # add latency_s065/l130 (58 total cands)
 
 # Stage 2-B: Gated C-candidates (Method A: mask -inf for inactive extra cands)
 # C_GATE_V1_ENABLED=True → CANDIDATES 50+6=56 (extra 6 gated by physics)

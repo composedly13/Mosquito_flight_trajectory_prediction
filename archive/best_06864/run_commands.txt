@@ -1,0 +1,16 @@
+﻿# Stage 2-B v2-jerk — LB 0.6864 신기록 (2026-05-29)
+# Previous best: Stage 2-B v1 LB 0.6826
+
+# v1 (Smart56) + jerk_extreme_pos180/neg180 = Smart58
+# gate: JT_q95 (jerk>=1.038493 OR perp>=0.626477, act=7.4%)
+# seed42 OOF: 0.6524, seed777 OOF: 0.6522
+# Oracle: 78.88%, C-group: 21.1%, gate_F: 0.6820
+
+# 학습
+python dev/experiments/train.py --seed 42 --gate-v1 --v2-jerk --out-tag _stage2b_v2_jerk
+python dev/experiments/train.py --seed 777 --gate-v1 --v2-jerk --out-tag _stage2b_v2_jerk
+
+# 제출
+python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_v2_jerk --gate-v1 --v2-jerk --out-name submission_stage2b_v2_jerk_42_777.csv
+
+# LB: 0.6864 (2026-05-29 12:55:02)

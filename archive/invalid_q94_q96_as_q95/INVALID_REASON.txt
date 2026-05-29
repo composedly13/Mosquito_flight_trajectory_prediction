@@ -1,0 +1,33 @@
+﻿# invalid_q94_q96_as_q95 — 2026-05-29
+
+## 원인
+candidates.py의 compute_gate_mask_gpu/np에서 CLI --gate-jerk-thresh / --gate-turn-thresh 인자가
+실제 gate에 반영되지 않았음.
+
+Python default parameter는 함수 정의(import) 시점에 freeze됨:
+  def compute_gate_mask_gpu(x, jerk_thresh=C_GATE_JERK_THRESH, ...)
+→ 이후 candidates.C_GATE_JERK_THRESH 패치해도 default는 변경되지 않음.
+
+## 결과
+q94 (--gate-jerk-thresh 0.928880) → 실제로 q95(1.038493) threshold로 실행됨
+q96 (--gate-jerk-thresh 1.166809) → 실제로 q95(1.038493) threshold로 실행됨
+fold별 epoch/best/hit 값이 q94/q96 완전 동일 — 무효 확인.
+
+## 조치
+- compute_gate_mask_gpu/np: import candidates as _self; jerk_thresh = _self.C_GATE_JERK_THRESH (동적 읽기)
+- train.py: [GATE v1] diagnostic print 추가
+- 본 폴더 모델은 의사결정에 사용하지 않음
+
+## 추가 기록 (2026-05-29 - 2차 무효 확인)
+q94 threshold ablation 목적으로 재학습 시도했으나,
+train.py의 두 번째 freeze 버그로 인해 동일하게 무효:
+
+from config import *  → C_GATE_V1_ENABLED = False (frozen in train.py namespace)
+from candidates import N_CANDIDATES → N_CANDIDATES = 50 (frozen)
+
+__main__에서 _cfg.C_GATE_V1_ENABLED = True 패치해도
+train.py 로컬 C_GATE_V1_ENABLED는 여전히 False →
+학습 루프 if C_GATE_V1_ENABLED: 는 실행되지 않음.
+
+결론: gate threshold는 학습에 영향 없음. q94/q95/q96 훈련은 동일한 모델.
+threshold ablation은 inference-only(analyze/predict)로 수행함.

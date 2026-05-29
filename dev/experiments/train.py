@@ -198,6 +198,7 @@ def train_fold(
     device: torch.device,
     patience: int = PATIENCE,
     cand_dim: int | None = None,
+    epochs: int = EPOCHS,
 ):
     val_mask   = np.array([fold_id(i) == fold for i in ids])
     train_mask = ~val_mask
@@ -205,9 +206,12 @@ def train_fold(
     train_ds = MosquitoDataset(coords[train_mask], labels[train_mask], augment=True)
     val_ds   = MosquitoDataset(coords[val_mask],   labels[val_mask],   augment=False)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
 
+    # Verify actual candidate count (not frozen N_CANDIDATES)
+    import candidates as _cv; _nc = len(_cv.CANDIDATES)
+    print(f"  [Fold {fold}] actual N_CANDIDATES={_nc}  cand_dim={cand_dim}")
     model     = CandidateSelector(cand_dim=cand_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -215,7 +219,7 @@ def train_fold(
     best_hit, best_state, patience_cnt = 0.0, None, 0
     best_preds = np.zeros((val_mask.sum(), 3), dtype=np.float32)
 
-    pbar = tqdm(range(1, EPOCHS + 1), desc=f"Fold {fold}")
+    pbar = tqdm(range(1, epochs + 1), desc=f"Fold {fold}")
     for epoch in pbar:
         # Train
         model.train()
@@ -342,6 +346,14 @@ def train(seed: int = SEED, patience: int = PATIENCE,
           f"  |  CAND_DIM={_active_cand_dim}"
           f"  |  turn_boost={turn_boost:.2f}  jerk_decay={jerk_decay:.2f}")
 
+    # Stage 2-B gate diagnostics
+    if C_GATE_V1_ENABLED:
+        import candidates as _cands_dbg
+        jt = _cands_dbg.C_GATE_JERK_THRESH
+        tt = _cands_dbg.C_GATE_TURN_THRESH
+        print(f"[GATE v1] ENABLED  jerk_thresh={jt:.6f}  turn_thresh={tt:.6f}")
+        print(f"[GATE v1] save_dir: {OUTPUT_DIR / f'seed{seed}{out_tag}'}")
+
     # Each seed gets its own subdirectory so multi-seed runs don't overwrite each other.
     out_dir = OUTPUT_DIR / f"seed{seed}{out_tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -351,11 +363,23 @@ def train(seed: int = SEED, patience: int = PATIENCE,
     all_states   = []
     oof_preds    = np.zeros((len(ids), 3), dtype=np.float32)
 
+    # Gate active ratio check (once, before folds)
+    if C_GATE_V1_ENABLED:
+        import candidates as _cands_dbg2
+        from candidates import compute_gate_mask_np as _gmask_np, N_CANDIDATES_BASE as _nb
+        _sample_mask = _gmask_np(coords[:1000])   # quick check on first 1000
+        _act = _sample_mask[:, _nb:].any(axis=1).mean()
+        print(f"[GATE v1] train gate active ratio (sample N=1000): {_act:.3f}  "
+              f"(jerk={_cands_dbg2.C_GATE_JERK_THRESH:.4f}  "
+              f"turn={_cands_dbg2.C_GATE_TURN_THRESH:.4f})")
+
     for fold in range(N_FOLDS):
         print(f"\n=== Fold {fold + 1}/{N_FOLDS} ===")
+        import config as _cfg_ep
         hit, state, val_mask, val_preds = train_fold(
             fold, ids, coords, labels, device,
-            patience=patience, cand_dim=_active_cand_dim
+            patience=patience, cand_dim=_active_cand_dim,
+            epochs=_cfg_ep.EPOCHS,
         )
         fold_results.append(hit)
         all_states.append(state)
@@ -390,6 +414,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--patience", type=int, default=PATIENCE)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help="Override BATCH_SIZE (default: 256). Patience auto-scales.")
     parser.add_argument("--listmle-weight", type=float, default=LISTMLE_WEIGHT)
     parser.add_argument("--out-tag", type=str, default="",
                         help="Suffix for model dir (e.g. '_stage2a_sign')")
@@ -398,10 +424,89 @@ if __name__ == "__main__":
                         help="Enable jerk/perp sign features (CAND_DIM 14→16)")
     parser.add_argument("--turn-boost", type=float, default=TURN_TARGET_BOOST)
     parser.add_argument("--jerk-decay", type=float, default=JERK_TARGET_DECAY)
-    # Stage 2-B flag
+    # Stage 2-B v1 flag
     parser.add_argument("--gate-v1", action="store_true",
-                        help="Gated C-candidates v1 (Smart50+6, JT_q95 gate)")
+                        help="Gated C-candidates v1 (Smart50+6)")
+    parser.add_argument("--gate-jerk-thresh", type=float, default=None,
+                        help="Override C_GATE_JERK_THRESH (default: config q95=1.038493)")
+    parser.add_argument("--gate-turn-thresh", type=float, default=None,
+                        help="Override C_GATE_TURN_THRESH (default: config q95=0.626477)")
+    # Stage 2-B v2 flags (mutually exclusive, each adds 2 more extra candidates)
+    parser.add_argument("--v2-turn",    action="store_true",
+                        help="v2-A: add turn_p110/n110  (58 cands)")
+    parser.add_argument("--v2-jerk",    action="store_true",
+                        help="v2-B: add jerk_extreme±1.80 (58 cands)")
+    parser.add_argument("--v2-latency", action="store_true",
+                        help="v2-C: add latency_s065/l130 (58 cands)")
+    # v3 combinations
+    parser.add_argument("--v3-jerk-turn",    action="store_true", help="v3-A: jerk+turn (60)")
+    parser.add_argument("--v3-jerk-latency", action="store_true", help="v3-B: jerk+latency (60)")
+    parser.add_argument("--v3-full",         action="store_true", help="v3-full: jerk+turn+lat (62)")
+    # Jerk strength ablation
+    parser.add_argument("--v2-jerk200",      action="store_true", help="jerk±2.00 (58)")
+    parser.add_argument("--v2-jerk220",      action="store_true", help="jerk±2.20 (58)")
+    # One-sided variants (v2-jerk base + 1 candidate)
+    parser.add_argument("--v2-turn-p",       action="store_true", help="turn_p110 only (59)")
+    parser.add_argument("--v2-turn-n",       action="store_true", help="turn_n110 only (59)")
+    parser.add_argument("--v2-lat-slow",     action="store_true", help="latency_s065 only (59)")
+    parser.add_argument("--v2-lat-fast",     action="store_true", help="latency_l130 only (59)")
     args = parser.parse_args()
+
+    # Stage 2-B: override gate thresholds if specified
+    if args.gate_jerk_thresh is not None or args.gate_turn_thresh is not None:
+        import config as _cfg_th
+        import candidates as _cands_th
+        if args.gate_jerk_thresh is not None:
+            _cfg_th.C_GATE_JERK_THRESH   = args.gate_jerk_thresh
+            _cands_th.C_GATE_JERK_THRESH = args.gate_jerk_thresh
+        if args.gate_turn_thresh is not None:
+            _cfg_th.C_GATE_TURN_THRESH   = args.gate_turn_thresh
+            _cands_th.C_GATE_TURN_THRESH = args.gate_turn_thresh
+
+    # v3 / ablation shortcuts → expand to v2 flag combinations
+    if args.v3_jerk_turn:    args.v2_jerk = True; args.v2_turn = True
+    if args.v3_jerk_latency: args.v2_jerk = True; args.v2_latency = True
+    if args.v3_full:         args.v2_jerk = True; args.v2_turn = True; args.v2_latency = True
+    if args.v2_jerk200:  args.v2_jerk200  = True
+    if args.v2_jerk220:  args.v2_jerk220  = True
+    if args.v2_turn_p:   args.v2_turn_p   = True
+    if args.v2_turn_n:   args.v2_turn_n   = True
+    if args.v2_lat_slow: args.v2_lat_slow = True
+    if args.v2_lat_fast: args.v2_lat_fast = True
+
+    # Stage 2-B v2+: set all flags
+    _v2_any = any([args.v2_turn, args.v2_jerk, args.v2_latency,
+                   getattr(args,'v2_jerk200',False), getattr(args,'v2_jerk220',False),
+                   getattr(args,'v2_turn_p',False), getattr(args,'v2_turn_n',False),
+                   getattr(args,'v2_lat_slow',False), getattr(args,'v2_lat_fast',False)])
+    if _v2_any:
+        import config as _cfg_v2
+        import candidates as _cands_v2
+        for _attr, _cfg_name in [
+            ('v2_jerk',    'C_GATE_V2_JERK'),    ('v2_turn',    'C_GATE_V2_TURN'),
+            ('v2_latency', 'C_GATE_V2_LATENCY'), ('v2_jerk200', 'C_GATE_V2_JERK_200'),
+            ('v2_jerk220', 'C_GATE_V2_JERK_220'), ('v2_turn_p', 'C_GATE_V2_TURN_P'),
+            ('v2_turn_n',  'C_GATE_V2_TURN_N'),  ('v2_lat_slow','C_GATE_V2_LAT_SLOW'),
+            ('v2_lat_fast','C_GATE_V2_LAT_FAST'),
+        ]:
+            val = getattr(args, _attr, False)
+            setattr(_cfg_v2,   _cfg_name, val)
+            setattr(_cands_v2, _cfg_name, val)
+        if not args.gate_v1: args.gate_v1 = True
+
+    # Stage 2-B v2: set v2 flags before CANDIDATES extension
+    if args.v2_turn or args.v2_jerk or args.v2_latency:
+        import config as _cfg_v2
+        import candidates as _cands_v2
+        _cfg_v2.C_GATE_V2_TURN    = args.v2_turn
+        _cfg_v2.C_GATE_V2_JERK    = args.v2_jerk
+        _cfg_v2.C_GATE_V2_LATENCY = args.v2_latency
+        _cands_v2.C_GATE_V2_TURN    = args.v2_turn
+        _cands_v2.C_GATE_V2_JERK    = args.v2_jerk
+        _cands_v2.C_GATE_V2_LATENCY = args.v2_latency
+        # v2 requires v1 gate (--gate-v1 implied)
+        if not args.gate_v1:
+            args.gate_v1 = True
 
     # Stage 2-B: extend CANDIDATES before training starts
     if args.gate_v1:
@@ -410,15 +515,44 @@ if __name__ == "__main__":
         _cfg2b.C_GATE_V1_ENABLED   = True
         _cands2b.C_GATE_V1_ENABLED = True
         from candidates import (CANDIDATES as _bc, _EXTRA_CANDIDATES_V1 as _ev1,
+                                 _V2_JERK_EXTRA as _v2j, _V2_JERK_200_EXTRA as _v2j200,
+                                 _V2_JERK_220_EXTRA as _v2j220,
+                                 _V2_TURN_EXTRA as _v2t, _V2_TURN_P_EXTRA as _v2tp,
+                                 _V2_TURN_N_EXTRA as _v2tn,
+                                 _V2_LATENCY_EXTRA as _v2l,
+                                 _V2_LAT_SLOW_EXTRA as _v2ls, _V2_LAT_FAST_EXTRA as _v2lf,
                                  N_CANDIDATES_BASE as _nb, _family_id as _fid)
+        import numpy as _np
         if len(_cands2b.CANDIDATES) == _nb:   # extend only once
-            _cands2b.CANDIDATES   = list(_bc) + list(_ev1)
+            _v2_extra = (
+                (list(_v2j)    if _cands2b.C_GATE_V2_JERK     else []) +
+                (list(_v2j200) if _cands2b.C_GATE_V2_JERK_200 else []) +
+                (list(_v2j220) if _cands2b.C_GATE_V2_JERK_220 else []) +
+                (list(_v2t)    if _cands2b.C_GATE_V2_TURN     else []) +
+                (list(_v2tp)   if _cands2b.C_GATE_V2_TURN_P   else []) +
+                (list(_v2tn)   if _cands2b.C_GATE_V2_TURN_N   else []) +
+                (list(_v2l)    if _cands2b.C_GATE_V2_LATENCY  else []) +
+                (list(_v2ls)   if _cands2b.C_GATE_V2_LAT_SLOW else []) +
+                (list(_v2lf)   if _cands2b.C_GATE_V2_LAT_FAST else [])
+            )
+            _cands2b.CANDIDATES   = list(_bc) + list(_ev1) + list(_v2_extra)
             _cands2b.N_CANDIDATES = len(_cands2b.CANDIDATES)
-            import numpy as _np
             _cands2b.CANDIDATE_FAMILY = _np.array(
                 [_fid(s.name) for s in _cands2b.CANDIDATES], dtype=_np.int64
             )
             _cands2b._CAND_PARAMS_CACHE.clear()
+
+    # batch_size override: scale patience AND epochs proportionally
+    if args.batch_size != BATCH_SIZE:
+        import config as _cfg_bs
+        scale = args.batch_size / BATCH_SIZE
+        _cfg_bs.BATCH_SIZE = args.batch_size
+        if args.patience == PATIENCE:       # user didn't manually override
+            args.patience = int(PATIENCE * scale)
+        # Also scale EPOCHS so patience can still trigger before hard cap
+        _cfg_bs.EPOCHS = int(_cfg_bs.EPOCHS * scale)
+        print(f"[BATCH] batch_size={args.batch_size}  scale={scale:.1f}x"
+              f"  patience→{args.patience}  EPOCHS→{_cfg_bs.EPOCHS}")
 
     train(seed=args.seed, patience=args.patience,
           listmle_weight=args.listmle_weight, out_tag=args.out_tag,

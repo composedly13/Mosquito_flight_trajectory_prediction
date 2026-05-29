@@ -1307,8 +1307,67 @@ if __name__ == "__main__":
     parser.add_argument("--sign-feat", action="store_true",
                         help="Enable sign features (CAND_DIM 14->16). Use with _stage2a_sign/combo models.")
     parser.add_argument("--gate-v1", action="store_true",
-                        help="Enable gated C-candidates v1 (56 cands, JT_q95). Use with _stage2b_gated_v1 models.")
+                        help="Enable gated C-candidates v1 (56 cands). Use with _stage2b models.")
+    parser.add_argument("--gate-jerk-thresh", type=float, default=None,
+                        help="Override C_GATE_JERK_THRESH for gate evaluation")
+    parser.add_argument("--gate-turn-thresh", type=float, default=None,
+                        help="Override C_GATE_TURN_THRESH for gate evaluation")
+    parser.add_argument("--v2-turn",    action="store_true", help="v2-A: turn_p110/n110")
+    parser.add_argument("--v2-jerk",    action="store_true", help="v2-B: jerk_extreme±1.80")
+    parser.add_argument("--v2-latency", action="store_true", help="v2-C: latency_s065/l130")
+    parser.add_argument("--v3-jerk-turn",    action="store_true", help="v3-A: jerk+turn (60)")
+    parser.add_argument("--v3-jerk-latency", action="store_true", help="v3-B: jerk+latency (60)")
+    parser.add_argument("--v3-full",         action="store_true", help="v3-full: jerk+turn+lat (62)")
+    parser.add_argument("--v2-jerk200",      action="store_true", help="jerk±2.00 (58)")
+    parser.add_argument("--v2-jerk220",      action="store_true", help="jerk±2.20 (58)")
+    parser.add_argument("--v2-turn-p",       action="store_true", help="turn_p110 only (59)")
+    parser.add_argument("--v2-turn-n",       action="store_true", help="turn_n110 only (59)")
+    parser.add_argument("--v2-lat-slow",     action="store_true", help="latency_s065 only (59)")
+    parser.add_argument("--v2-lat-fast",     action="store_true", help="latency_l130 only (59)")
     args = parser.parse_args()
+
+    # Stage 2-B: gate threshold overrides
+    if args.gate_jerk_thresh is not None or args.gate_turn_thresh is not None:
+        import config as _cfg_th2
+        import candidates as _cands_th2
+        if args.gate_jerk_thresh is not None:
+            _cfg_th2.C_GATE_JERK_THRESH   = args.gate_jerk_thresh
+            _cands_th2.C_GATE_JERK_THRESH = args.gate_jerk_thresh
+        if args.gate_turn_thresh is not None:
+            _cfg_th2.C_GATE_TURN_THRESH   = args.gate_turn_thresh
+            _cands_th2.C_GATE_TURN_THRESH = args.gate_turn_thresh
+
+    # v3 / ablation shortcuts
+    if args.v3_jerk_turn:    args.v2_jerk = True; args.v2_turn = True
+    if args.v3_jerk_latency: args.v2_jerk = True; args.v2_latency = True
+    if args.v3_full:         args.v2_jerk = True; args.v2_turn = True; args.v2_latency = True
+    # set all v2 flags in config/candidates
+    _v2_flags = ['v2_jerk','v2_turn','v2_latency','v2_jerk200','v2_jerk220',
+                 'v2_turn_p','v2_turn_n','v2_lat_slow','v2_lat_fast']
+    _v2_cfgs  = ['C_GATE_V2_JERK','C_GATE_V2_TURN','C_GATE_V2_LATENCY',
+                 'C_GATE_V2_JERK_200','C_GATE_V2_JERK_220',
+                 'C_GATE_V2_TURN_P','C_GATE_V2_TURN_N',
+                 'C_GATE_V2_LAT_SLOW','C_GATE_V2_LAT_FAST']
+    _any_v2 = any(getattr(args, f, False) for f in _v2_flags)
+    if _any_v2:
+        import config as _cfg_v2a; import candidates as _cands_v2a
+        for _f, _c in zip(_v2_flags, _v2_cfgs):
+            v = getattr(args, _f, False)
+            setattr(_cfg_v2a, _c, v); setattr(_cands_v2a, _c, v)
+        if not args.gate_v1: args.gate_v1 = True
+
+    # Stage 2-B v2: set flags before CANDIDATES extension
+    if args.v2_turn or args.v2_jerk or args.v2_latency:
+        import config as _cfg_v2a
+        import candidates as _cands_v2a
+        _cfg_v2a.C_GATE_V2_TURN    = args.v2_turn
+        _cfg_v2a.C_GATE_V2_JERK    = args.v2_jerk
+        _cfg_v2a.C_GATE_V2_LATENCY = args.v2_latency
+        _cands_v2a.C_GATE_V2_TURN    = args.v2_turn
+        _cands_v2a.C_GATE_V2_JERK    = args.v2_jerk
+        _cands_v2a.C_GATE_V2_LATENCY = args.v2_latency
+        if not args.gate_v1:
+            args.gate_v1 = True
 
     # Stage 2-B: extend CANDIDATES before everything else
     if args.gate_v1:
@@ -1317,16 +1376,33 @@ if __name__ == "__main__":
         _cfg2b.C_GATE_V1_ENABLED   = True
         _cands2b.C_GATE_V1_ENABLED = True
         from candidates import (CANDIDATES as _bc, _EXTRA_CANDIDATES_V1 as _ev1,
+                                 _V2_JERK_EXTRA as _v2j, _V2_JERK_200_EXTRA as _v2j200,
+                                 _V2_JERK_220_EXTRA as _v2j220,
+                                 _V2_TURN_EXTRA as _v2t, _V2_TURN_P_EXTRA as _v2tp,
+                                 _V2_TURN_N_EXTRA as _v2tn,
+                                 _V2_LATENCY_EXTRA as _v2l,
+                                 _V2_LAT_SLOW_EXTRA as _v2ls, _V2_LAT_FAST_EXTRA as _v2lf,
                                  N_CANDIDATES_BASE as _nb, _family_id as _fid2b)
         import numpy as _np2b
         if len(_cands2b.CANDIDATES) == _nb:
-            _cands2b.CANDIDATES   = list(_bc) + list(_ev1)
+            _v2_ex = (
+                (list(_v2j)    if _cands2b.C_GATE_V2_JERK     else []) +
+                (list(_v2j200) if _cands2b.C_GATE_V2_JERK_200 else []) +
+                (list(_v2j220) if _cands2b.C_GATE_V2_JERK_220 else []) +
+                (list(_v2t)    if _cands2b.C_GATE_V2_TURN     else []) +
+                (list(_v2tp)   if _cands2b.C_GATE_V2_TURN_P   else []) +
+                (list(_v2tn)   if _cands2b.C_GATE_V2_TURN_N   else []) +
+                (list(_v2l)    if _cands2b.C_GATE_V2_LATENCY  else []) +
+                (list(_v2ls)   if _cands2b.C_GATE_V2_LAT_SLOW else []) +
+                (list(_v2lf)   if _cands2b.C_GATE_V2_LAT_FAST else [])
+            )
+            _cands2b.CANDIDATES   = list(_bc) + list(_ev1) + list(_v2_ex)
             _cands2b.N_CANDIDATES = len(_cands2b.CANDIDATES)
             _cands2b.CANDIDATE_FAMILY = _np2b.array(
                 [_fid2b(s.name) for s in _cands2b.CANDIDATES], dtype=_np2b.int64
             )
             _cands2b._CAND_PARAMS_CACHE.clear()
-        # Update analyze.py's own module-level references so functions see 56 cands
+        # Update analyze.py's own module-level references
         CANDIDATES       = _cands2b.CANDIDATES
         N_CANDIDATES     = _cands2b.N_CANDIDATES
         CANDIDATE_FAMILY = _cands2b.CANDIDATE_FAMILY

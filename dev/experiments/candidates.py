@@ -18,7 +18,11 @@ import torch
 import torch.nn.functional as _F
 from config import (EPS, CAND_FEAT_NORM_MODE, CAND_FEAT_CLIP_VALUE,
                     CAND_FEAT_INTERACTION, CAND_FEAT_SIGN,
-                    C_GATE_V1_ENABLED, C_GATE_JERK_THRESH, C_GATE_TURN_THRESH)
+                    C_GATE_V1_ENABLED, C_GATE_JERK_THRESH, C_GATE_TURN_THRESH,
+                    C_GATE_V2_TURN, C_GATE_V2_JERK, C_GATE_V2_LATENCY,
+                    C_GATE_V2_JERK_200, C_GATE_V2_JERK_220,
+                    C_GATE_V2_TURN_P, C_GATE_V2_TURN_N,
+                    C_GATE_V2_LAT_SLOW, C_GATE_V2_LAT_FAST)
 
 
 @dataclass(frozen=True)
@@ -119,8 +123,55 @@ _EXTRA_CANDIDATES_V1 = [
 ]
 N_EXTRA_V1 = len(_EXTRA_CANDIDATES_V1)
 
+# ── Stage 2-B v2: Additional gated extra candidates ───────────────────────────
+# Each set adds 2 candidates on top of v1 extra 6 (total 58 candidates when active)
+# Gate: same JT_q95 threshold as v1 (obs_jerk >= 1.038493 OR obs_acc_perp >= 0.626477)
+#
+# Candidate param extrapolation from v1 extremes:
+#   turn_p090 → turn_p110: each +10pp perp: d1 -0.06, par -0.08
+#   jerk_extreme(1.20) → 1.80: each +0.40 jerk: d1 -0.03, par -0.045
+#   latency: same d1/par/perp, just extend time_scale
+_V2_TURN_EXTRA = [
+    CandidateSpec("turn_p110",            1.60,  0.14,  1.10),   # sharp left turn v2
+    CandidateSpec("turn_n110",            1.60,  0.14, -1.10),   # sharp right turn v2
+]
+_V2_JERK_EXTRA = [
+    CandidateSpec("jerk_extreme_pos180",  1.84,  0.61,  0.00, jerk= 1.80),  # extreme positive jerk v2
+    CandidateSpec("jerk_extreme_neg180",  1.84,  0.61,  0.00, jerk=-1.80),  # extreme negative jerk v2
+]
+_V2_LATENCY_EXTRA = [
+    CandidateSpec("latency_s065",         1.98,  0.96, -0.08, time_scale=0.65),  # very slow timing v2
+    CandidateSpec("latency_l130",         1.98,  0.96, -0.08, time_scale=1.30),  # very fast timing v2
+]
+N_EXTRA_V2 = 2  # each v2 variant adds 2 candidates
+
+# ── Jerk strength ablation (±2.00, ±2.20) ────────────────────────────────────
+# jerk±1.20(v1) → ±1.80(v2) → ±2.00 → ±2.20(last attack)
+# param extrapolation: each +0.40: d1 -0.03, par -0.045
+_V2_JERK_200_EXTRA = [
+    CandidateSpec("jerk_extreme_pos200",  1.80,  0.565, 0.00, jerk= 2.00),
+    CandidateSpec("jerk_extreme_neg200",  1.80,  0.565, 0.00, jerk=-2.00),
+]
+_V2_JERK_220_EXTRA = [
+    CandidateSpec("jerk_extreme_pos220",  1.77,  0.52,  0.00, jerk= 2.20),
+    CandidateSpec("jerk_extreme_neg220",  1.77,  0.52,  0.00, jerk=-2.20),
+]
+
+# ── One-sided turn/latency (v2_jerk base + 1 candidate) ──────────────────────
+_V2_TURN_P_EXTRA  = [CandidateSpec("turn_p110", 1.60, 0.14,  1.10)]
+_V2_TURN_N_EXTRA  = [CandidateSpec("turn_n110", 1.60, 0.14, -1.10)]
+_V2_LAT_SLOW_EXTRA = [CandidateSpec("latency_s065", 1.98, 0.96, -0.08, time_scale=0.65)]
+_V2_LAT_FAST_EXTRA = [CandidateSpec("latency_l130", 1.98, 0.96, -0.08, time_scale=1.30)]
+
 # Effective candidate list — extended when gate enabled
-CANDIDATES    = CANDIDATES + (_EXTRA_CANDIDATES_V1 if C_GATE_V1_ENABLED else [])
+# v2 variants build on v1 (50 base + 6 v1 + 2 v2 = 58)
+_active_v2 = (
+    _V2_TURN_EXTRA    if C_GATE_V2_TURN    else
+    _V2_JERK_EXTRA    if C_GATE_V2_JERK    else
+    _V2_LATENCY_EXTRA if C_GATE_V2_LATENCY else
+    []
+)
+CANDIDATES    = CANDIDATES + (_EXTRA_CANDIDATES_V1 if C_GATE_V1_ENABLED else []) + _active_v2
 N_CANDIDATES  = len(CANDIDATES)
 
 FAMILY_NAMES = ["base", "acc", "frenet", "turn", "jerk", "latency"]
@@ -523,14 +574,20 @@ def _gate_physics_np(x: np.ndarray):
 
 
 def compute_gate_mask_np(x: np.ndarray,
-                          jerk_thresh: float = C_GATE_JERK_THRESH,
-                          turn_thresh: float = C_GATE_TURN_THRESH) -> np.ndarray:
+                          jerk_thresh: float | None = None,
+                          turn_thresh: float | None = None) -> np.ndarray:
     """
     x: (N, 11, 3)
     Returns: (N, N_CANDIDATES_BASE + N_EXTRA_V1) bool
     Base 50 candidates: always True.
-    Extra 6 candidates: activated by physics gate (JT_q95).
+    Extra 6 candidates: activated by physics gate.
+    Thresholds read dynamically from module (supports CLI override).
     """
+    # Read dynamically — NOT as default param (frozen at import time)
+    import candidates as _self
+    if jerk_thresh is None: jerk_thresh = _self.C_GATE_JERK_THRESH
+    if turn_thresh is None:  turn_thresh = _self.C_GATE_TURN_THRESH
+
     N = len(x)
     n_b = N_CANDIDATES_BASE
     mask = np.ones((N, n_b + N_EXTRA_V1), dtype=bool)
@@ -540,22 +597,43 @@ def compute_gate_mask_np(x: np.ndarray,
     jerk_gate  = obs_jerk >= jerk_thresh
     jt_gate    = turn_gate | jerk_gate
 
-    # turn_p090 [n_b+0], turn_n090 [n_b+1]
-    mask[:, n_b:n_b+2] = turn_gate[:, None]
-    # jerk_extreme_pos [n_b+2], jerk_extreme_neg [n_b+3]
-    mask[:, n_b+2:n_b+4] = jerk_gate[:, None]
-    # latency_s070 [n_b+4], latency_l125 [n_b+5]
-    mask[:, n_b+4:n_b+6] = jt_gate[:, None]
+    # v1 extra (indices n_b+0 … n_b+5)
+    mask[:, n_b:n_b+2]   = turn_gate[:, None]   # turn_p090, turn_n090
+    mask[:, n_b+2:n_b+4] = jerk_gate[:, None]   # jerk_extreme_pos/neg
+    mask[:, n_b+4:n_b+6] = jt_gate[:, None]     # latency_s070, l125
+
+    # v2 extra — additive slots after v1 (n_b+6 onward)
+    import candidates as _s
+    _slot = n_b + 6
+    for _flag, _gate, _n in [
+        (_s.C_GATE_V2_JERK,      jerk_gate, 2),
+        (_s.C_GATE_V2_JERK_200,  jerk_gate, 2),
+        (_s.C_GATE_V2_JERK_220,  jerk_gate, 2),
+        (_s.C_GATE_V2_TURN,      turn_gate, 2),
+        (_s.C_GATE_V2_TURN_P,    turn_gate, 1),
+        (_s.C_GATE_V2_TURN_N,    turn_gate, 1),
+        (_s.C_GATE_V2_LATENCY,   jt_gate,   2),
+        (_s.C_GATE_V2_LAT_SLOW,  jt_gate,   1),
+        (_s.C_GATE_V2_LAT_FAST,  jt_gate,   1),
+    ]:
+        if _flag:
+            mask[:, _slot:_slot+_n] = _gate[:, None]
+            _slot += _n
     return mask
 
 
 def compute_gate_mask_gpu(x: torch.Tensor,
-                           jerk_thresh: float = C_GATE_JERK_THRESH,
-                           turn_thresh: float = C_GATE_TURN_THRESH) -> torch.Tensor:
+                           jerk_thresh: float | None = None,
+                           turn_thresh: float | None = None) -> torch.Tensor:
     """
     x: (B, 11, 3)
     Returns: (B, N_CANDIDATES_BASE + N_EXTRA_V1) bool
     """
+    # Read dynamically — NOT as default param (frozen at import time)
+    import candidates as _self
+    if jerk_thresh is None: jerk_thresh = _self.C_GATE_JERK_THRESH
+    if turn_thresh is None:  turn_thresh = _self.C_GATE_TURN_THRESH
+
     B   = x.shape[0]
     n_b = N_CANDIDATES_BASE
     dev = x.device
@@ -577,8 +655,27 @@ def compute_gate_mask_gpu(x: torch.Tensor,
     jerk_gate = obs_jerk >= jerk_thresh
     jt_gate   = turn_gate | jerk_gate
 
-    mask = torch.ones(B, n_b + N_EXTRA_V1, dtype=torch.bool, device=dev)
+    import candidates as _sg
+    _slot = n_b + 6
+    # Count total v2 slots
+    _v2_info = [
+        (_sg.C_GATE_V2_JERK,     jerk_gate, 2),
+        (_sg.C_GATE_V2_JERK_200, jerk_gate, 2),
+        (_sg.C_GATE_V2_JERK_220, jerk_gate, 2),
+        (_sg.C_GATE_V2_TURN,     turn_gate, 2),
+        (_sg.C_GATE_V2_TURN_P,   turn_gate, 1),
+        (_sg.C_GATE_V2_TURN_N,   turn_gate, 1),
+        (_sg.C_GATE_V2_LATENCY,  jt_gate,   2),
+        (_sg.C_GATE_V2_LAT_SLOW, jt_gate,   1),
+        (_sg.C_GATE_V2_LAT_FAST, jt_gate,   1),
+    ]
+    n_v2 = sum(n for f, _, n in _v2_info if f)
+    mask = torch.ones(B, n_b + N_EXTRA_V1 + n_v2, dtype=torch.bool, device=dev)
     mask[:, n_b:n_b+2]   = turn_gate.unsqueeze(1)
     mask[:, n_b+2:n_b+4] = jerk_gate.unsqueeze(1)
     mask[:, n_b+4:n_b+6] = jt_gate.unsqueeze(1)
+    for _f, _g, _n in _v2_info:
+        if _f:
+            mask[:, _slot:_slot+_n] = _g.unsqueeze(1)
+            _slot += _n
     return mask
