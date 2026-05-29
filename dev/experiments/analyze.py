@@ -70,6 +70,7 @@ def tta_oof_preds(models: dict, ids: list, coords: np.ndarray,
 
 def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
                   device: torch.device, topk: int = 3, temp: float = 1.0) -> np.ndarray:
+    from config import C_GATE_V1_ENABLED
     N = len(ids)
     preds = np.zeros((N, 3), dtype=np.float32)
     for fold_idx, model in models.items():
@@ -85,6 +86,10 @@ def get_oof_preds(models: dict, ids: list, coords: np.ndarray,
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
                 logits  = model(seq_t, cand_t)
+                if C_GATE_V1_ENABLED:
+                    from candidates import compute_gate_mask_gpu
+                    gate = compute_gate_mask_gpu(c)
+                    logits = logits.masked_fill(~gate, -1e9)
                 pred    = selector_predict(logits, cands_t, topk=topk, temp=temp)
             preds[val_idx[start:end]] = pred.cpu().numpy()
     return preds
@@ -165,6 +170,11 @@ def get_oof_preds_multiseed(
                 seq_t      = make_seq_features_gpu(c)
                 cand_t     = make_cand_features_gpu(c, cands_t)
                 avg_logits = sum(m(seq_t, cand_t) for m in fold_models) / len(fold_models)
+                from config import C_GATE_V1_ENABLED
+                if C_GATE_V1_ENABLED:
+                    from candidates import compute_gate_mask_gpu
+                    gate = compute_gate_mask_gpu(c)
+                    avg_logits = avg_logits.masked_fill(~gate, -1e9)
                 pred       = selector_predict(avg_logits, cands_t, topk=topk, temp=temp)
             preds[val_pos[start:end]] = pred.cpu().numpy()
 
@@ -287,6 +297,7 @@ def oracle_selector_decomposition(
     oracle_dist = dist_c.min(axis=1)               # (N,)
     is_oracle_hit = oracle_dist <= R_HIT_THRESHOLD  # (N,) bool
 
+    from config import C_GATE_V1_ENABLED
     N = len(ids)
     all_logits = np.full((N, N_CANDIDATES), -np.inf, dtype=np.float32)
     for fold_idx, model in models.items():
@@ -302,6 +313,10 @@ def oracle_selector_decomposition(
                 seq_t   = make_seq_features_gpu(c)
                 cand_t  = make_cand_features_gpu(c, cands_t)
                 logits  = model(seq_t, cand_t)
+                if C_GATE_V1_ENABLED:
+                    from candidates import compute_gate_mask_gpu
+                    gate = compute_gate_mask_gpu(c)
+                    logits = logits.masked_fill(~gate, -1e9)
             all_logits[val_idx[start:end]] = logits.cpu().numpy()
 
     # Oracle rank (0-based: 0 = top-1)
@@ -395,8 +410,10 @@ def _topk_preds_np(logits: np.ndarray, cands_np: np.ndarray,
 def get_oof_logits_cands(models: dict, ids: list, coords: np.ndarray,
                          device: torch.device) -> tuple:
     """OOF logits + candidate positions (shared across sections 9-12).
+    When C_GATE_V1_ENABLED: logits are gate-masked (-inf for inactive extra cands).
     Returns: (logits (N,C), cands_np (N,C,3))
     """
+    from config import C_GATE_V1_ENABLED
     N = len(ids)
     logits_arr = np.full((N, N_CANDIDATES), -np.inf, dtype=np.float32)
     cands_np   = make_candidates(coords)                                   # (N, C, 3) — deterministic
@@ -414,6 +431,10 @@ def get_oof_logits_cands(models: dict, ids: list, coords: np.ndarray,
                 st = make_seq_features_gpu(c)
                 ft = make_cand_features_gpu(c, ct)
                 lg = model(st, ft)
+                if C_GATE_V1_ENABLED:
+                    from candidates import compute_gate_mask_gpu
+                    gate = compute_gate_mask_gpu(c)
+                    lg   = lg.masked_fill(~gate, -1e9)
             logits_arr[val_pos[start:end]] = lg.cpu().numpy()
     return logits_arr, cands_np
 
@@ -1184,6 +1205,26 @@ def analyze(seeds: list = None, out_tag: str = ""):
     print(f"\n  oracle↔selector 갭    : {gap:.4f}  ({gap*100:.1f}pp)")
     print(f"  70% 달성 조건          : efficiency ≥ {0.70/oracle:.1%}")
 
+    # ── 6b. Stage 2-B: Gate split OOF ────────────────────────────
+    from config import C_GATE_V1_ENABLED
+    if C_GATE_V1_ENABLED:
+        print("\n" + "=" * 55)
+        print("6b. GATE SPLIT OOF  (gate_true vs gate_false)")
+        print("=" * 55)
+        from candidates import compute_gate_mask_np, N_CANDIDATES_BASE
+        gate_np = compute_gate_mask_np(coords)             # (N, 56) bool
+        gate_active = gate_np[:, N_CANDIDATES_BASE:].any(axis=1)  # (N,) — JT gate fired
+        n_gt = int(gate_active.sum()); n_gf = int((~gate_active).sum())
+        print(f"  gate=True  samples : {n_gt:5d} ({gate_active.mean():.1%})")
+        print(f"  gate=False samples : {n_gf:5d} ({(~gate_active).mean():.1%})")
+        oof_gt = r_hit(best_oof[gate_active],  labels[gate_active])
+        oof_gf = r_hit(best_oof[~gate_active], labels[~gate_active])
+        print(f"  OOF gate=True      : {oof_gt:.4f}")
+        print(f"  OOF gate=False     : {oof_gf:.4f}  (Phase 15 ref: 0.6786)")
+        print(f"  OOF overall        : {best_hit:.4f}")
+        if oof_gf < 0.6750:
+            print("  ※ gate=False OOF 이상 — Phase 15(0.6786) 대비 손상 가능성")
+
     # ── 7. Multi-seed ensemble OOF ────────────────────────────────
     if len(seeds) > 1:
         n_total = len(seeds) * N_FOLDS
@@ -1265,7 +1306,30 @@ if __name__ == "__main__":
                         help="Suffix appended to model dir (e.g. '_lml05'). Must match --out-tag used in train.py.")
     parser.add_argument("--sign-feat", action="store_true",
                         help="Enable sign features (CAND_DIM 14->16). Use with _stage2a_sign/combo models.")
+    parser.add_argument("--gate-v1", action="store_true",
+                        help="Enable gated C-candidates v1 (56 cands, JT_q95). Use with _stage2b_gated_v1 models.")
     args = parser.parse_args()
+
+    # Stage 2-B: extend CANDIDATES before everything else
+    if args.gate_v1:
+        import config as _cfg2b
+        import candidates as _cands2b
+        _cfg2b.C_GATE_V1_ENABLED   = True
+        _cands2b.C_GATE_V1_ENABLED = True
+        from candidates import (CANDIDATES as _bc, _EXTRA_CANDIDATES_V1 as _ev1,
+                                 N_CANDIDATES_BASE as _nb, _family_id as _fid2b)
+        import numpy as _np2b
+        if len(_cands2b.CANDIDATES) == _nb:
+            _cands2b.CANDIDATES   = list(_bc) + list(_ev1)
+            _cands2b.N_CANDIDATES = len(_cands2b.CANDIDATES)
+            _cands2b.CANDIDATE_FAMILY = _np2b.array(
+                [_fid2b(s.name) for s in _cands2b.CANDIDATES], dtype=_np2b.int64
+            )
+            _cands2b._CAND_PARAMS_CACHE.clear()
+        # Update analyze.py's own module-level references so functions see 56 cands
+        CANDIDATES       = _cands2b.CANDIDATES
+        N_CANDIDATES     = _cands2b.N_CANDIDATES
+        CANDIDATE_FAMILY = _cands2b.CANDIDATE_FAMILY
 
     # Stage 2-A: patch CAND_DIM if sign features were used during training
     if args.sign_feat:

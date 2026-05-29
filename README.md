@@ -282,9 +282,15 @@ python dev/experiments/train.py --seed 42 --turn-boost 1.20 --jerk-decay 0.97 \
   --out-tag _stage2a_b120d97     # best: OOF +0.0012, LB 0.6774
 
 # ── Stage 2-B: Gated C-candidates v1 ────────────────────────────────────────
-python dev/experiments/train.py --seed 42 --gate-v1 --out-tag _stage2b_gated_v1
-# Smart50 + 6 extra (turn_p/n090, jerk_extreme_±1.20, latency_s070/l125)
-# Gate: JT_q95 (obs_jerk >= 1.038 OR obs_acc_perp >= 0.626, act=7.4%)
+# 학습
+python dev/experiments/train.py --seed 42  --gate-v1 --out-tag _stage2b_gated_v1
+python dev/experiments/train.py --seed 777 --gate-v1 --out-tag _stage2b_gated_v1
+# 분석 (56 candidates, gate mask 적용)
+python dev/experiments/analyze.py --seed 42  --out-tag _stage2b_gated_v1 --gate-v1
+python dev/experiments/analyze.py --seeds 42 777 --out-tag _stage2b_gated_v1 --gate-v1
+# 제출 파일 생성
+python dev/experiments/predict.py --seeds 42 777 --out-tag _stage2b_gated_v1 \
+  --gate-v1 --out-name submission_stage2b_gated_v1_42_777.csv
 ```
 
 ---
@@ -396,10 +402,13 @@ Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 | **Phase 15: cand_feat interaction + no-clip (2-seed 42+777)** | 50★ | — | 77.02% | 84.4% | 0.6502 | **LB 0.6776** ✅ 신기록 (+0.0044 vs 0.6732), CAND_DIM 10→14 |
 | Stage 1: inference calibration (dynamic topk/soft bias) | 50★ | — | 77.02% | 84.4% | — | 미제출 — dynamic topk NG, soft bias 앙상블 −0.0002 → 폐기 |
 | **Stage 2-A b120d97** (boost=1.20, decay=0.97, seed42+777) | 50★ | — | 77.02% | 84.5% | 0.6516/0.6522 | **LB 0.6774** (−0.0002 vs best) jerk top1 66.9%→58.4% |
+| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42) | **56★** | — | **78.26%** | 83.4% | 0.6525 | Oracle +1.24pp, C-group 23.0%→21.7%, gate=False +0.002 |
+| **Stage 2-B gated v1** (Smart50+6, JT_q95, seed42+777) | **56★** | — | **78.26%** | 83.4% | 0.6458† | 2-seed OOF −0.31pp vs P15(0.6489) — LB TBD |
 
 > † RegMLP OOF: 단독 예측 기준. selector-only(β=0.0) OOF=0.6484.  
 > ‡ 앙상블 OOF는 config 혼재로 신뢰 불가. LB=0.669 실제 하락 확인.  
 > § TransformerRegressor(reg2) OOF: C-group 0.62%, overall 2.25% — entropy H≈0.986(54개 구조적 최대) → blend 무효.
+> † Stage 2-B 2-seed ensemble OOF: gate=False 손상 없음(+0.002 개선), gate=True(7.4%)에서 두 seed 간 logit 불일치로 ensemble OOF 하락. 단일 seed OOF는 각각 +0.002 개선.
 
 ### Selector Error Decomposition
 
@@ -421,6 +430,7 @@ Phase 11 결과는 [성능 기록](#성능-기록) 섹션에 보존됩니다.
 | **Phase 11 Step 2: soft-CE + reg_head (CAND_DIM=10)** | **15.8** | 39.1% | 27.5% | 48.0% | 24.6% | oracle rank Phase 7(13.3) 대비 소폭 악화, OOF +0.27pp — reg_head 효과 제한적 |
 | **Phase 15 (Smart50+interaction, seed42)** | **14.2** | 43.9% | 32.8% | 44.3% | 23.0% | LB 0.6776 ✅ current best — jerk top1=66.9%, turn_oracle_rank=20.9 |
 | Stage 2-A b120d97 (turn_boost=1.20, jerk_decay=0.97) | **14.2** | 43.6% | 32.5% | 44.5% | 23.0% | jerk top1=58.4% (−8.5pp), turn_or+jerk_t1=25.6% (−6.3pp), B_top10_RHit 0.8245→0.8287 |
+| **Stage 2-B gated v1** (Smart56, JT_q95 gate) | 27.2* | 43.6% | 22.1%* | 56.1%* | 21.7% | *A/B 왜곡: gate=False extra cand oracle이 rank≥50→B-group 강제편입. OOF 기준 판단 |
 
 ---
 
@@ -2544,7 +2554,7 @@ b120d97 결과: seed42 +0.0012 OOF, seed777 +0.0021 OOF, **LB 0.6774** (−0.000
 
 금지(재확인): sign feature, turn boost 추가 시도, jerk decay 강화
 
-**[Stage 2-B: Gated C-candidates v1 — 진행 중]**
+**[Stage 2-B: Gated C-candidates v1 — 부분 성공, LB 제출 대기]**
 
 C-group 분류 (N=2298, 23.0%):
 | 유형 | 수 | %_C | nearest |
@@ -2568,3 +2578,25 @@ Extra candidates v1 (6개, 기존 50 + 6 = 56):
 - N_CANDIDATES: 50 (default) → 56 (--gate-v1)
 - CAND_DIM=14 유지
 - gate false 샘플은 Phase 15와 동일한 예측 보장
+
+**Stage 2-B v1 최종 결과 (2026-05-29)**
+
+| 지표 | Phase 15 | Stage 2-B gated v1 | delta |
+|---|---:|---:|---:|
+| Oracle (56 cands) | 77.02% | **78.26%** | +1.24pp |
+| C-group | 23.0% | **21.7%** | -1.3pp |
+| Efficiency | 84.4% | 83.4% | -1.0pp |
+| seed42 OOF | 0.6504 | **0.6525** | +0.0021 |
+| seed777 OOF | 0.6501 | **0.6526** | +0.0025 |
+| gate=False OOF (s42) | 0.6786 | **0.6806** | +0.0020 ✓ |
+| gate=False OOF (s777) | ~0.679 | **0.6811** | +0.0025 ✓ |
+| 2-seed ensemble OOF | 0.6489 | 0.6458 | -0.0031 |
+
+gate=False 손상 없음 확인 — 두 seed 모두 Phase 15 대비 개선.
+2-seed ensemble OOF 하락 원인: 두 gated 모델이 extra candidates에서 서로 다른 logit 분포를 학습, 평균 시 불일치 발생.
+LB 제출 파일: `submission_stage2b_gated_v1_42_777.csv`
+
+config 기록: `dev/experiments/outputs/stage2b_gated_v1_config.txt`
+
+판정: 부분 성공 — Oracle/C-group 개선 + gate=False 무손상.
+LB 0.6776 초과 시 → Stage 2-B current candidate 승격, LB 미달 시 → v2 진입 여부 논의

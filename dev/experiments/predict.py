@@ -114,6 +114,12 @@ def predict(
             seq_t      = make_seq_features_gpu(c)
             cand_t     = make_cand_features_gpu(c, cands_t)
             avg_logits = sum(m(seq_t, cand_t) for m in selectors) / len(selectors)
+            # Stage 2-B: apply gate mask if enabled
+            from config import C_GATE_V1_ENABLED
+            if C_GATE_V1_ENABLED:
+                from candidates import compute_gate_mask_gpu
+                gate = compute_gate_mask_gpu(c)
+                avg_logits = avg_logits.masked_fill(~gate, -1e9)
             pred       = selector_predict(avg_logits, cands_t, topk=TOPK, temp=temp)
 
         all_preds.append(pred.cpu().numpy())
@@ -195,7 +201,26 @@ if __name__ == "__main__":
                         help="Suffix appended to model dir (e.g. '_lml05'). Must match --out-tag used in train.py.")
     parser.add_argument("--out-name", type=str, default="",
                         help="Output CSV filename (default: submission.csv). Use to avoid overwriting current best.")
+    parser.add_argument("--gate-v1", action="store_true",
+                        help="Enable Stage 2-B gated C-candidates v1 (56 cands, JT_q95)")
     args = parser.parse_args()
+
+    # Stage 2-B gate patch (before loading models)
+    if args.gate_v1:
+        import config as _cfg_p
+        import candidates as _cands_p
+        _cfg_p.C_GATE_V1_ENABLED   = True
+        _cands_p.C_GATE_V1_ENABLED = True
+        from candidates import (CANDIDATES as _bc_p, _EXTRA_CANDIDATES_V1 as _ev1_p,
+                                 N_CANDIDATES_BASE as _nb_p, _family_id as _fid_p)
+        import numpy as _np_p
+        if len(_cands_p.CANDIDATES) == _nb_p:
+            _cands_p.CANDIDATES   = list(_bc_p) + list(_ev1_p)
+            _cands_p.N_CANDIDATES = len(_cands_p.CANDIDATES)
+            _cands_p.CANDIDATE_FAMILY = _np_p.array(
+                [_fid_p(s.name) for s in _cands_p.CANDIDATES], dtype=_np_p.int64
+            )
+            _cands_p._CAND_PARAMS_CACHE.clear()
 
     if args.seeds:
         seeds = args.seeds
